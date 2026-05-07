@@ -1,0 +1,6 @@
+async-upnp-client>=0.40
+pyatv>=0.14
+zeroconf>=0.131
+aiohttp>=3.9
+rich>=13
+click>=8.1
