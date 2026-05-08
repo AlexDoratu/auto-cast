@@ -773,6 +773,13 @@ class AutoCastGUI(QMainWindow):
 
     def _on_play(self):
         self._animate_button_click(self.play_btn)
+        tab_text = self.tabs.tabText(self.tabs.currentIndex())
+        if tab_text == "Window Cast":
+            self._on_cast_window()
+            return
+        if tab_text == "Screen Cast":
+            self._on_cast_screen()
+            return
         if not self.selected_device:
             QMessageBox.warning(self, "Warning", "Please select a device first.")
             return
