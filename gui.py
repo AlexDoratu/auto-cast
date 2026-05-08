@@ -8,14 +8,14 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSlider, QFrame, QProgressBar, QSizePolicy, QMessageBox,
+    QHeaderView, QSlider, QFrame, QMessageBox,
     QCheckBox, QSpinBox, QComboBox, QTabWidget, QListWidget, QListWidgetItem,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QObject
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, QSequentialAnimationGroup
+from PySide6.QtGui import QColor, QGraphicsDropShadowEffect
 
 from device import Device, DeviceType
-from scanner import scan_all, scan_by_type
+from scanner import scan_all
 from media_server import MediaServer
 import dlna_controller
 import airplay_controller
@@ -29,6 +29,71 @@ class SignalBridge(QObject):
     devices_found = Signal(list)
     status_update = Signal(str)
     error_occurred = Signal(str)
+
+
+# ── Animation Helpers ──────────────────────────────────────────────────────
+
+class FadeLabel(QLabel):
+    """Label with fade-in animation when text changes."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._fade = QPropertyAnimation(self, b"windowOpacity")
+        self._fade.setDuration(300)
+        self._fade.setStartValue(0.0)
+        self._fade.setEndValue(1.0)
+        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def setText(self, text: str):
+        if text == self.text():
+            return
+        self._fade.stop()
+        super().setWindowOpacity(0.0)
+        super().setText(text)
+        self._fade.start()
+
+
+class ScanAnimation(QObject):
+    """Pulsing glow animation for the scan button during scanning."""
+
+    def __init__(self, button: QPushButton):
+        super().__init__(button)
+        self._btn = button
+        self._glow = QGraphicsDropShadowEffect(button)
+        self._glow.setColor(QColor("#e94560"))
+        self._glow.setOffset(0, 0)
+        self._glow.setBlurRadius(0)
+        button.setGraphicsEffect(self._glow)
+
+        self._pulse_up = QPropertyAnimation(self._glow, b"blurRadius")
+        self._pulse_up.setDuration(900)
+        self._pulse_up.setStartValue(0)
+        self._pulse_up.setEndValue(18)
+        self._pulse_up.setEasingCurve(QEasingCurve.Type.InOutQuad)
+
+        self._pulse_down = QPropertyAnimation(self._glow, b"blurRadius")
+        self._pulse_down.setDuration(900)
+        self._pulse_down.setStartValue(18)
+        self._pulse_down.setEndValue(0)
+        self._pulse_down.setEasingCurve(QEasingCurve.Type.InOutQuad)
+
+        self._group = QSequentialAnimationGroup(button)
+        self._group.addAnimation(self._pulse_up)
+        self._group.addAnimation(self._pulse_down)
+        self._group.setLoopCount(-1)
+
+    def start(self):
+        self._btn.setObjectName("scanningBtn")
+        self._btn.style().unpolish(self._btn)
+        self._btn.style().polish(self._btn)
+        self._group.start()
+
+    def stop(self):
+        self._group.stop()
+        self._glow.setBlurRadius(0)
+        self._btn.setObjectName("")
+        self._btn.style().unpolish(self._btn)
+        self._btn.style().polish(self._btn)
 
 
 # ── Styles ──────────────────────────────────────────────────────────────────
@@ -53,6 +118,7 @@ QPushButton {
     padding: 10px 20px;
     font-weight: bold;
     min-height: 20px;
+    transition-duration: 0.2s;
 }
 
 QPushButton:hover {
@@ -82,6 +148,13 @@ QPushButton#dangerBtn {
 
 QPushButton#dangerBtn:hover {
     background-color: #e74c3c;
+}
+
+QPushButton#scanningBtn {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #e94560, stop:0.5 #ff6b6b, stop:1 #e94560);
+    color: white;
+    border: none;
+    font-weight: bold;
 }
 
 QPushButton#secondaryBtn {
@@ -360,10 +433,10 @@ class AutoCastGUI(QMainWindow):
         self.refresh_interval.setRange(3, 60)
         self.refresh_interval.setValue(10)
         self.refresh_interval.setSuffix(" sec")
-        self.refresh_interval.setFixedWidth(80)
+        self.refresh_interval.setMinimumWidth(85)
 
         self.scan_btn = QPushButton("Scan")
-        self.scan_btn.setFixedWidth(100)
+        self.scan_btn.setMinimumWidth(100)
 
         device_header.addWidget(device_label)
         device_header.addStretch()
@@ -433,7 +506,7 @@ class AutoCastGUI(QMainWindow):
         win_label = QLabel("Select Window")
         win_label.setObjectName("sectionTitle")
         self.refresh_windows_btn = QPushButton("Refresh")
-        self.refresh_windows_btn.setFixedWidth(80)
+        self.refresh_windows_btn.setMinimumWidth(80)
         self.refresh_windows_btn.setObjectName("secondaryBtn")
         win_header.addWidget(win_label)
         win_header.addStretch()
@@ -483,7 +556,7 @@ class AutoCastGUI(QMainWindow):
         self.fps_slider.setRange(1, 30)
         self.fps_slider.setValue(10)
         self.fps_value = QLabel("10 FPS")
-        self.fps_value.setFixedWidth(60)
+        self.fps_value.setMinimumWidth(60)
         fps_row.addWidget(self.fps_slider)
         fps_row.addWidget(self.fps_value)
         screen_layout.addLayout(fps_row)
@@ -520,7 +593,7 @@ class AutoCastGUI(QMainWindow):
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(70)
         self.volume_value = QLabel("70%")
-        self.volume_value.setFixedWidth(40)
+        self.volume_value.setMinimumWidth(45)
         vol_row.addWidget(self.volume_slider)
         vol_row.addWidget(self.volume_value)
         right_layout.addLayout(vol_row)
@@ -529,15 +602,32 @@ class AutoCastGUI(QMainWindow):
         main_layout.addLayout(content, stretch=1)
 
         # ── Status Bar ──
-        self.status_label = QLabel("Ready")
+        self.status_label = FadeLabel("Ready")
         self.status_label.setObjectName("status")
         main_layout.addWidget(self.status_label)
+
+        # ── Scan Animation ──
+        self._scan_anim = ScanAnimation(self.scan_btn)
 
     def _make_separator(self) -> QFrame:
         sep = QFrame()
         sep.setObjectName("separator")
         sep.setFrameShape(QFrame.Shape.HLine)
         return sep
+
+    def _animate_button_click(self, btn: QPushButton):
+        """Quick scale pulse on button click."""
+        anim = QPropertyAnimation(btn, b"geometry")
+        anim.setDuration(150)
+        rect = btn.geometry()
+        # Small inward scale (2px)
+        anim.setKeyValueAt(0.0, rect)
+        anim.setKeyValueAt(0.3, rect.adjusted(2, 1, -2, -1))
+        anim.setKeyValueAt(1.0, rect)
+        anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+        anim.start()
+        # Keep reference so it's not garbage collected
+        btn._click_anim = anim
 
     def _connect_signals(self):
         # Device scanning
@@ -575,12 +665,14 @@ class AutoCastGUI(QMainWindow):
             self.scan_count = 0
             self.scan_btn.setEnabled(False)
             self.scan_btn.setText("Auto...")
+            self._scan_anim.start()
             interval_ms = self.refresh_interval.value() * 1000
             self.auto_refresh_timer.start(interval_ms)
             self.status_label.setText("Auto-refresh: scanning...")
             self._do_auto_scan()
         else:
             self.is_auto_refreshing = False
+            self._scan_anim.stop()
             self.auto_refresh_timer.stop()
             self.scan_btn.setEnabled(True)
             self.scan_btn.setText("Scan")
@@ -606,6 +698,7 @@ class AutoCastGUI(QMainWindow):
     def _on_scan(self):
         self.scan_btn.setEnabled(False)
         self.scan_btn.setText("Scanning...")
+        self._scan_anim.start()
         self.status_label.setText("Scanning for devices...")
 
         def do_scan():
@@ -620,6 +713,7 @@ class AutoCastGUI(QMainWindow):
 
     def _on_devices_found(self, devices: list[Device]):
         prev_ip = self.selected_device.ip if self.selected_device else None
+        self.selected_device = None
 
         self.devices = devices
         self.device_table.setRowCount(len(devices))
@@ -640,10 +734,12 @@ class AutoCastGUI(QMainWindow):
 
             if prev_ip and d.ip == prev_ip:
                 self.device_table.selectRow(i)
+                self.selected_device = d
 
         self.device_count.setText(f"{len(devices)} device(s) found")
 
         if not self.is_auto_refreshing:
+            self._scan_anim.stop()
             self.scan_btn.setEnabled(True)
             self.scan_btn.setText("Scan")
             self.status_label.setText(f"Found {len(devices)} device(s)")
@@ -662,6 +758,7 @@ class AutoCastGUI(QMainWindow):
     # ── Media File ───────────────────────────────────────────────────────────
 
     def _on_browse(self):
+        self._animate_button_click(self.browse_btn)
         ext_list = " ".join(f"*{ext}" for ext in sorted(SUPPORTED_EXTENSIONS))
         filepath, _ = QFileDialog.getOpenFileName(
             self, "Select Media File", "",
@@ -675,6 +772,7 @@ class AutoCastGUI(QMainWindow):
             self.status_label.setText(f"Selected: {name}")
 
     def _on_play(self):
+        self._animate_button_click(self.play_btn)
         if not self.selected_device:
             QMessageBox.warning(self, "Warning", "Please select a device first.")
             return
@@ -735,6 +833,7 @@ class AutoCastGUI(QMainWindow):
             self.window_info_label.setText(f"{w.process_name} — {w.rect[2]}x{w.rect[3]}")
 
     def _on_cast_window(self):
+        self._animate_button_click(self.cast_window_btn)
         if not self.selected_device:
             QMessageBox.warning(self, "Warning", "Please select a target device first.")
             return
@@ -761,7 +860,6 @@ class AutoCastGUI(QMainWindow):
                 server = MediaServer()
                 loop.run_until_complete(server.start())
 
-                original_handle = self.streamer._handle_media
                 streamer_ref = self.streamer
 
                 async def stream_handle(request):
@@ -801,6 +899,7 @@ class AutoCastGUI(QMainWindow):
             self.monitor_combo.addItem(m["name"])
 
     def _on_cast_screen(self):
+        self._animate_button_click(self.cast_screen_btn)
         if not self.selected_device:
             QMessageBox.warning(self, "Warning", "Please select a target device first.")
             return
@@ -859,6 +958,7 @@ class AutoCastGUI(QMainWindow):
     # ── Stop & Volume ────────────────────────────────────────────────────────
 
     def _on_stop(self):
+        self._animate_button_click(self.stop_btn)
         if not self.selected_device:
             return
 
