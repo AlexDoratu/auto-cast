@@ -5,7 +5,7 @@ import logging
 import socket
 import xml.etree.ElementTree as ET
 from typing import Optional
-from urllib.parse import urljoin
+from urllib.parse import urlparse
 
 import aiohttp
 from zeroconf import ServiceBrowser, Zeroconf
@@ -120,7 +120,6 @@ async def _fetch_dlna_description(location: str) -> Optional[Device]:
 
         control_url = _find_control_url(device_elem, ns)
 
-        from urllib.parse import urlparse
         parsed = urlparse(location)
         ip = parsed.hostname
         port = parsed.port or 80
@@ -161,90 +160,56 @@ def _find_control_url(device_elem, ns) -> Optional[str]:
     return None
 
 
-async def scan_airplay(timeout: float = 5.0) -> list[Device]:
-    """Scan for AirPlay devices via mDNS."""
-    devices = []
+async def _scan_mdns(
+    service_type: str,
+    device_type: DeviceType,
+    model_key: bytes,
+    timeout: float,
+) -> list[Device]:
+    """Generic mDNS scanner for any service type."""
     zc = AsyncZeroconf()
     found = {}
 
-    class AirPlayListener:
-        def add_service(self, zc_instance, service_type, name):
-            info = zc_instance.get_service_info(service_type, name)
-            if info:
-                ip = None
-                if info.addresses:
-                    ip = socket.inet_ntoa(info.addresses[0])
-                if ip:
-                    device = Device(
-                        name=name.replace(f".{service_type}", ""),
-                        device_type=DeviceType.AIRPLAY,
-                        ip=ip,
-                        port=info.port,
-                        model=info.properties.get(b"model", b"").decode(errors="ignore"),
-                    )
-                    found[name] = device
+    class Listener:
+        def add_service(self, zc_instance, svc_type, name):
+            info = zc_instance.get_service_info(svc_type, name)
+            if info and info.addresses:
+                ip = socket.inet_ntoa(info.addresses[0])
+                device = Device(
+                    name=name.replace(f".{svc_type}", ""),
+                    device_type=device_type,
+                    ip=ip,
+                    port=info.port,
+                    model=info.properties.get(model_key, b"").decode(errors="ignore"),
+                )
+                found[name] = device
 
-        def remove_service(self, zc_instance, service_type, name):
+        def remove_service(self, zc_instance, svc_type, name):
             found.pop(name, None)
 
-        def update_service(self, zc_instance, service_type, name):
+        def update_service(self, zc_instance, svc_type, name):
             pass
 
-    listener = AirPlayListener()
     try:
-        browser = ServiceBrowser(zc.zeroconf, "_airplay._tcp.local.", listener)
+        browser = ServiceBrowser(zc.zeroconf, service_type, Listener())
         await asyncio.sleep(timeout)
         browser.cancel()
-        devices = list(found.values())
+        return list(found.values())
     except Exception as e:
-        logger.debug(f"AirPlay scan error: {e}")
+        logger.debug(f"mDNS scan error for {service_type}: {e}")
+        return []
     finally:
         await zc.async_close()
 
-    return devices
+
+async def scan_airplay(timeout: float = 5.0) -> list[Device]:
+    """Scan for AirPlay devices via mDNS."""
+    return await _scan_mdns("_airplay._tcp.local.", DeviceType.AIRPLAY, b"model", timeout)
 
 
 async def scan_chromecast(timeout: float = 5.0) -> list[Device]:
     """Scan for Chromecast devices via mDNS."""
-    devices = []
-    zc = AsyncZeroconf()
-    found = {}
-
-    class CastListener:
-        def add_service(self, zc_instance, service_type, name):
-            info = zc_instance.get_service_info(service_type, name)
-            if info:
-                ip = None
-                if info.addresses:
-                    ip = socket.inet_ntoa(info.addresses[0])
-                if ip:
-                    device = Device(
-                        name=name.replace(f".{service_type}", ""),
-                        device_type=DeviceType.CHROMECAST,
-                        ip=ip,
-                        port=info.port,
-                        model=info.properties.get(b"md", b"").decode(errors="ignore"),
-                    )
-                    found[name] = device
-
-        def remove_service(self, zc_instance, service_type, name):
-            found.pop(name, None)
-
-        def update_service(self, zc_instance, service_type, name):
-            pass
-
-    listener = CastListener()
-    try:
-        browser = ServiceBrowser(zc.zeroconf, "_googlecast._tcp.local.", listener)
-        await asyncio.sleep(timeout)
-        browser.cancel()
-        devices = list(found.values())
-    except Exception as e:
-        logger.debug(f"Chromecast scan error: {e}")
-    finally:
-        await zc.async_close()
-
-    return devices
+    return await _scan_mdns("_googlecast._tcp.local.", DeviceType.CHROMECAST, b"md", timeout)
 
 
 async def scan_all(timeout: float = 5.0) -> list[Device]:

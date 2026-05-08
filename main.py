@@ -17,6 +17,8 @@ from config import Config, SUPPORTED_EXTENSIONS, MIME_TYPES
 import dlna_controller
 import airplay_controller
 
+config = Config.from_env()
+
 console = Console()
 __version__ = "1.0.0"
 
@@ -103,7 +105,7 @@ def _validate_media(filepath: str) -> tuple[str, str]:
     return str(path), content_type
 
 
-async def _play_on_dlna(device: Device, media_path: str, content_type: str):
+async def _play_on_dlna(device: Device, media_path: str, content_type: str, loop: bool = False):
     """Play media on a DLNA device with local HTTP server."""
     server = MediaServer()
     try:
@@ -115,10 +117,21 @@ async def _play_on_dlna(device: Device, media_path: str, content_type: str):
         await dlna_controller.play(device, media_url, content_type)
 
         console.print(f"\n[bold green]Now playing on {device.name}[/bold green]")
-        console.print("[dim]Press Ctrl+C to stop[/dim]\n")
+        if loop:
+            console.print("[dim]Loop mode enabled. Press Ctrl+C to stop[/dim]\n")
+        else:
+            console.print("[dim]Press Ctrl+C to stop[/dim]\n")
 
         while True:
             await asyncio.sleep(1)
+            if loop:
+                try:
+                    info = await dlna_controller.get_transport_info(device)
+                    state = info.get("CurrentTransportState", "")
+                    if state == "STOPPED":
+                        await dlna_controller.play(device, media_url, content_type)
+                except Exception:
+                    pass
     except KeyboardInterrupt:
         console.print("\n[yellow]Stopping playback...[/yellow]")
         await dlna_controller.stop(device)
@@ -147,6 +160,7 @@ async def _auto_play(
     media_path: str,
     content_type: str,
     target_name: str | None,
+    loop: bool = False,
 ):
     """Auto-select device and play."""
     device = _select_device(devices, target_name)
@@ -157,7 +171,7 @@ async def _auto_play(
     console.print(f"\n[bold]Selected device:[/bold] {device}")
 
     if device.device_type == DeviceType.DLNA:
-        await _play_on_dlna(device, media_path, content_type)
+        await _play_on_dlna(device, media_path, content_type, loop)
     elif device.device_type == DeviceType.AIRPLAY:
         await _play_on_airplay(device, media_path)
     elif device.device_type == DeviceType.CHROMECAST:
@@ -175,7 +189,7 @@ def cli(verbose: bool):
 
 
 @cli.command()
-@click.option("--timeout", "-t", default=5.0, help="Scan timeout in seconds.")
+@click.option("--timeout", "-t", default=config.scan_timeout, help="Scan timeout in seconds.")
 @click.option("--type", "-T", "device_type", type=click.Choice(["dlna", "airplay", "chromecast"]), help="Filter by device type.")
 def scan(timeout: float, device_type: str | None):
     """Scan for available devices."""
@@ -188,9 +202,10 @@ def scan(timeout: float, device_type: str | None):
 @cli.command()
 @click.argument("media_file", type=click.Path(exists=True))
 @click.option("--to", "-t", "target", help="Target device name (partial match).")
-@click.option("--type", "-T", "device_type", type=click.Choice(["dlna", "airplay", "chromecast"]), help="Filter by device type.")
-@click.option("--timeout", default=5.0, help="Scan timeout in seconds.")
-def play(media_file: str, target: str | None, device_type: str | None, timeout: float):
+@click.option("--type", "-T", "device_type", type=click.Choice(["dlna", "airplay", "chromecast"]), default=config.default_device_type, help="Filter by device type.")
+@click.option("--timeout", default=config.scan_timeout, help="Scan timeout in seconds.")
+@click.option("--loop", "-l", is_flag=True, help="Loop playback.")
+def play(media_file: str, target: str | None, device_type: str | None, timeout: float, loop: bool):
     """Scan for devices and play a media file."""
     console.print(Panel("[bold]Auto-Cast Player[/bold]", style="blue"))
 
@@ -205,7 +220,7 @@ def play(media_file: str, target: str | None, device_type: str | None, timeout: 
         console.print("[red]No devices found. Cannot play.[/red]")
         sys.exit(1)
 
-    asyncio.run(_auto_play(devices, media_path, content_type, target))
+    asyncio.run(_auto_play(devices, media_path, content_type, target, loop))
 
 
 @cli.command()
@@ -225,6 +240,28 @@ def stop(device_name: str):
         asyncio.run(airplay_controller.stop(device))
 
     console.print(f"[green]Stopped on {device.name}[/green]")
+
+
+@cli.command()
+@click.argument("device_name")
+@click.argument("volume", type=click.IntRange(0, 100))
+def volume(device_name: str, volume: int):
+    """Set volume on a device (0-100)."""
+    devices = asyncio.run(_scan(config.scan_timeout, None))
+    device = _select_device(devices, device_name)
+    if not device:
+        console.print(f"[red]Device '{device_name}' not found.[/red]")
+        sys.exit(1)
+
+    if device.device_type == DeviceType.DLNA:
+        asyncio.run(dlna_controller.set_volume(device, volume))
+    elif device.device_type == DeviceType.AIRPLAY:
+        asyncio.run(airplay_controller.set_volume(device, volume))
+    else:
+        console.print(f"[yellow]Volume control not supported for {device.device_type.value}[/yellow]")
+        sys.exit(1)
+
+    console.print(f"[green]Volume set to {volume} on {device.name}[/green]")
 
 
 @cli.command(name="formats")
