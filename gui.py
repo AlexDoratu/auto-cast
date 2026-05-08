@@ -9,10 +9,10 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QTableWidget, QTableWidgetItem,
     QHeaderView, QSlider, QFrame, QProgressBar, QSizePolicy, QMessageBox,
-    QCheckBox, QSpinBox,
+    QCheckBox, QSpinBox, QComboBox, QTabWidget, QListWidget, QListWidgetItem,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QThread
-from PySide6.QtGui import QFont, QColor, QPalette, QIcon, QPainter, QLinearGradient
+from PySide6.QtCore import Qt, QTimer, Signal, QObject
+from PySide6.QtGui import QFont, QColor
 
 from device import Device, DeviceType
 from scanner import scan_all, scan_by_type
@@ -20,6 +20,7 @@ from media_server import MediaServer
 import dlna_controller
 import airplay_controller
 from config import SUPPORTED_EXTENSIONS, MIME_TYPES
+from capture import list_windows, get_monitors, ScreenStreamer
 
 
 # ── Signals Bridge ──────────────────────────────────────────────────────────
@@ -83,6 +84,11 @@ QPushButton#dangerBtn:hover {
     background-color: #e74c3c;
 }
 
+QPushButton#secondaryBtn {
+    background-color: #0f3460;
+    border: 1px solid #533483;
+}
+
 QTableWidget {
     background-color: #16213e;
     border: 1px solid #0f3460;
@@ -110,6 +116,28 @@ QHeaderView::section {
     font-weight: bold;
 }
 
+QListWidget {
+    background-color: #16213e;
+    border: 1px solid #0f3460;
+    border-radius: 8px;
+    padding: 4px;
+}
+
+QListWidget::item {
+    padding: 8px;
+    border-bottom: 1px solid #0f3460;
+    border-radius: 4px;
+}
+
+QListWidget::item:selected {
+    background-color: #533483;
+    color: white;
+}
+
+QListWidget::item:hover {
+    background-color: #0f3460;
+}
+
 QSlider::groove:horizontal {
     height: 6px;
     background: #0f3460;
@@ -129,20 +157,6 @@ QSlider::sub-page:horizontal {
     border-radius: 3px;
 }
 
-QProgressBar {
-    background-color: #0f3460;
-    border: none;
-    border-radius: 4px;
-    text-align: center;
-    color: white;
-    height: 8px;
-}
-
-QProgressBar::chunk {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #e94560, stop:1 #533483);
-    border-radius: 4px;
-}
-
 QLabel#title {
     font-size: 24px;
     font-weight: bold;
@@ -157,6 +171,12 @@ QLabel#subtitle {
 QLabel#status {
     color: #533483;
     font-weight: bold;
+}
+
+QLabel#sectionTitle {
+    font-size: 16px;
+    font-weight: bold;
+    color: #e94560;
 }
 
 QFrame#card {
@@ -202,6 +222,68 @@ QSpinBox::up-button, QSpinBox::down-button {
     border: none;
     width: 20px;
 }
+
+QComboBox {
+    background-color: #16213e;
+    border: 1px solid #0f3460;
+    border-radius: 6px;
+    padding: 6px 12px;
+    color: #e0e0e0;
+    min-height: 20px;
+}
+
+QComboBox:hover {
+    border: 1px solid #533483;
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: 30px;
+}
+
+QComboBox::down-arrow {
+    image: none;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 6px solid #e0e0e0;
+    margin-right: 8px;
+}
+
+QComboBox QAbstractItemView {
+    background-color: #16213e;
+    border: 1px solid #0f3460;
+    color: #e0e0e0;
+    selection-background-color: #533483;
+}
+
+QTabWidget::pane {
+    border: 1px solid #0f3460;
+    border-radius: 8px;
+    background-color: #1a1a2e;
+}
+
+QTabBar::tab {
+    background-color: #16213e;
+    color: #888;
+    border: 1px solid #0f3460;
+    border-bottom: none;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    padding: 10px 24px;
+    margin-right: 2px;
+}
+
+QTabBar::tab:selected {
+    background-color: #1a1a2e;
+    color: #e94560;
+    font-weight: bold;
+    border-bottom: 2px solid #e94560;
+}
+
+QTabBar::tab:hover:!selected {
+    background-color: #0f3460;
+    color: #e0e0e0;
+}
 """
 
 
@@ -217,6 +299,12 @@ class AutoCastGUI(QMainWindow):
         self.is_playing = False
         self.bridge = SignalBridge()
 
+        # Screen capture
+        self.streamer = ScreenStreamer(fps=10, quality=70)
+        self.is_streaming = False
+        self.windows_list = []
+        self.monitors_list = []
+
         # Auto-refresh timer
         self.auto_refresh_timer = QTimer()
         self.auto_refresh_timer.timeout.connect(self._do_auto_scan)
@@ -225,17 +313,18 @@ class AutoCastGUI(QMainWindow):
 
         self._init_ui()
         self._connect_signals()
+        self._refresh_windows()
 
     def _init_ui(self):
         self.setWindowTitle("Auto-Cast")
-        self.setMinimumSize(1000, 700)
-        self.resize(1100, 750)
+        self.setMinimumSize(1100, 750)
+        self.resize(1200, 800)
 
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
-        layout.setSpacing(16)
-        layout.setContentsMargins(24, 24, 24, 24)
+        main_layout = QVBoxLayout(central)
+        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(20, 20, 20, 20)
 
         # ── Header ──
         header = QHBoxLayout()
@@ -246,36 +335,32 @@ class AutoCastGUI(QMainWindow):
         header.addWidget(title)
         header.addWidget(subtitle)
         header.addStretch()
-        layout.addLayout(header)
+        main_layout.addLayout(header)
 
-        # ── Separator ──
         sep = QFrame()
         sep.setObjectName("separator")
         sep.setFrameShape(QFrame.Shape.HLine)
-        layout.addWidget(sep)
+        main_layout.addWidget(sep)
 
-        # ── Content Area ──
+        # ── Main Content ──
         content = QHBoxLayout()
         content.setSpacing(16)
 
-        # Left: Device list
+        # ── Left Panel: Devices ──
         left_panel = QFrame()
         left_panel.setObjectName("card")
         left_layout = QVBoxLayout(left_panel)
 
-        # Device header with scan controls
         device_header = QHBoxLayout()
         device_label = QLabel("Devices")
-        device_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #e94560;")
+        device_label.setObjectName("sectionTitle")
 
         self.auto_refresh_cb = QCheckBox("Auto Refresh")
-        self.auto_refresh_cb.setToolTip("Continuously scan for devices")
         self.refresh_interval = QSpinBox()
         self.refresh_interval.setRange(3, 60)
         self.refresh_interval.setValue(10)
         self.refresh_interval.setSuffix(" sec")
         self.refresh_interval.setFixedWidth(80)
-        self.refresh_interval.setToolTip("Scan interval in seconds")
 
         self.scan_btn = QPushButton("Scan")
         self.scan_btn.setFixedWidth(100)
@@ -287,7 +372,6 @@ class AutoCastGUI(QMainWindow):
         device_header.addWidget(self.scan_btn)
         left_layout.addLayout(device_header)
 
-        # Device table — wider columns
         self.device_table = QTableWidget()
         self.device_table.setColumnCount(4)
         self.device_table.setHorizontalHeaderLabels(["Name", "Type", "IP Address", "Status"])
@@ -311,35 +395,111 @@ class AutoCastGUI(QMainWindow):
 
         content.addWidget(left_panel, stretch=3)
 
-        # Right: Controls
+        # ── Right Panel: Controls with Tabs ──
         right_panel = QFrame()
         right_panel.setObjectName("card")
         right_layout = QVBoxLayout(right_panel)
-        right_layout.setSpacing(20)
 
-        # Media selection
+        self.tabs = QTabWidget()
+        right_layout.addWidget(self.tabs)
+
+        # Tab 1: Media File
+        file_tab = QWidget()
+        file_layout = QVBoxLayout(file_tab)
+        file_layout.setSpacing(16)
+
         media_label = QLabel("Media File")
-        media_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #e94560;")
-        right_layout.addWidget(media_label)
+        media_label.setObjectName("sectionTitle")
+        file_layout.addWidget(media_label)
 
         self.media_path_label = QLabel("No file selected")
         self.media_path_label.setObjectName("subtitle")
         self.media_path_label.setWordWrap(True)
         self.media_path_label.setMinimumHeight(40)
-        right_layout.addWidget(self.media_path_label)
+        file_layout.addWidget(self.media_path_label)
 
         self.browse_btn = QPushButton("Browse...")
-        right_layout.addWidget(self.browse_btn)
+        file_layout.addWidget(self.browse_btn)
 
-        # Separator
-        sep2 = QFrame()
-        sep2.setObjectName("separator")
-        sep2.setFrameShape(QFrame.Shape.HLine)
-        right_layout.addWidget(sep2)
+        file_layout.addStretch()
+        self.tabs.addTab(file_tab, "Media File")
 
-        # Playback controls
+        # Tab 2: Window Cast
+        window_tab = QWidget()
+        window_layout = QVBoxLayout(window_tab)
+        window_layout.setSpacing(12)
+
+        win_header = QHBoxLayout()
+        win_label = QLabel("Select Window")
+        win_label.setObjectName("sectionTitle")
+        self.refresh_windows_btn = QPushButton("Refresh")
+        self.refresh_windows_btn.setFixedWidth(80)
+        self.refresh_windows_btn.setObjectName("secondaryBtn")
+        win_header.addWidget(win_label)
+        win_header.addStretch()
+        win_header.addWidget(self.refresh_windows_btn)
+        window_layout.addLayout(win_header)
+
+        self.window_list = QListWidget()
+        self.window_list.setMinimumHeight(200)
+        window_layout.addWidget(self.window_list)
+
+        self.window_info_label = QLabel("Select a window to cast")
+        self.window_info_label.setObjectName("subtitle")
+        window_layout.addWidget(self.window_info_label)
+
+        self.cast_window_btn = QPushButton("Cast Window")
+        self.cast_window_btn.setObjectName("primaryBtn")
+        window_layout.addWidget(self.cast_window_btn)
+
+        window_layout.addStretch()
+        self.tabs.addTab(window_tab, "Window Cast")
+
+        # Tab 3: Screen Cast
+        screen_tab = QWidget()
+        screen_layout = QVBoxLayout(screen_tab)
+        screen_layout.setSpacing(12)
+
+        monitor_label = QLabel("Select Monitor")
+        monitor_label.setObjectName("sectionTitle")
+        screen_layout.addWidget(monitor_label)
+
+        self.monitor_combo = QComboBox()
+        self.monitor_combo.setMinimumHeight(36)
+        screen_layout.addWidget(self.monitor_combo)
+
+        self.refresh_monitors_btn = QPushButton("Refresh Monitors")
+        self.refresh_monitors_btn.setObjectName("secondaryBtn")
+        screen_layout.addWidget(self.refresh_monitors_btn)
+
+        screen_layout.addSpacing(16)
+
+        fps_label = QLabel("Frame Rate")
+        fps_label.setStyleSheet("font-weight: bold;")
+        screen_layout.addWidget(fps_label)
+
+        fps_row = QHBoxLayout()
+        self.fps_slider = QSlider(Qt.Orientation.Horizontal)
+        self.fps_slider.setRange(1, 30)
+        self.fps_slider.setValue(10)
+        self.fps_value = QLabel("10 FPS")
+        self.fps_value.setFixedWidth(60)
+        fps_row.addWidget(self.fps_slider)
+        fps_row.addWidget(self.fps_value)
+        screen_layout.addLayout(fps_row)
+
+        self.cast_screen_btn = QPushButton("Cast Screen")
+        self.cast_screen_btn.setObjectName("primaryBtn")
+        screen_layout.addWidget(self.cast_screen_btn)
+
+        screen_layout.addStretch()
+        self.tabs.addTab(screen_tab, "Screen Cast")
+
+        # ── Common Controls ──
+        right_layout.addWidget(self._make_separator())
+
         play_label = QLabel("Playback")
-        play_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #e94560;")
+        play_label.setObjectName("sectionTitle")
         right_layout.addWidget(play_label)
 
         btn_row = QHBoxLayout()
@@ -351,7 +511,6 @@ class AutoCastGUI(QMainWindow):
         btn_row.addWidget(self.stop_btn)
         right_layout.addLayout(btn_row)
 
-        # Volume
         vol_label = QLabel("Volume")
         vol_label.setStyleSheet("font-weight: bold;")
         right_layout.addWidget(vol_label)
@@ -366,29 +525,49 @@ class AutoCastGUI(QMainWindow):
         vol_row.addWidget(self.volume_value)
         right_layout.addLayout(vol_row)
 
-        right_layout.addStretch()
-
         content.addWidget(right_panel, stretch=2)
-        layout.addLayout(content, stretch=1)
+        main_layout.addLayout(content, stretch=1)
 
         # ── Status Bar ──
         self.status_label = QLabel("Ready")
         self.status_label.setObjectName("status")
-        layout.addWidget(self.status_label)
+        main_layout.addWidget(self.status_label)
+
+    def _make_separator(self) -> QFrame:
+        sep = QFrame()
+        sep.setObjectName("separator")
+        sep.setFrameShape(QFrame.Shape.HLine)
+        return sep
 
     def _connect_signals(self):
+        # Device scanning
         self.scan_btn.clicked.connect(self._on_scan)
+        self.auto_refresh_cb.toggled.connect(self._on_auto_refresh_toggle)
+        self.refresh_interval.valueChanged.connect(self._on_interval_change)
+        self.device_table.itemSelectionChanged.connect(self._on_device_select)
+
+        # Media file
         self.browse_btn.clicked.connect(self._on_browse)
         self.play_btn.clicked.connect(self._on_play)
         self.stop_btn.clicked.connect(self._on_stop)
         self.volume_slider.valueChanged.connect(self._on_volume_change)
-        self.device_table.itemSelectionChanged.connect(self._on_device_select)
-        self.auto_refresh_cb.toggled.connect(self._on_auto_refresh_toggle)
-        self.refresh_interval.valueChanged.connect(self._on_interval_change)
 
+        # Window cast
+        self.refresh_windows_btn.clicked.connect(self._refresh_windows)
+        self.cast_window_btn.clicked.connect(self._on_cast_window)
+        self.window_list.currentRowChanged.connect(self._on_window_select)
+
+        # Screen cast
+        self.refresh_monitors_btn.clicked.connect(self._refresh_monitors)
+        self.cast_screen_btn.clicked.connect(self._on_cast_screen)
+        self.fps_slider.valueChanged.connect(lambda v: self.fps_value.setText(f"{v} FPS"))
+
+        # Signals
         self.bridge.devices_found.connect(self._on_devices_found)
         self.bridge.status_update.connect(self._on_status_update)
         self.bridge.error_occurred.connect(self._on_error)
+
+    # ── Device Scanning ──────────────────────────────────────────────────────
 
     def _on_auto_refresh_toggle(self, checked: bool):
         if checked:
@@ -398,7 +577,7 @@ class AutoCastGUI(QMainWindow):
             self.scan_btn.setText("Auto...")
             interval_ms = self.refresh_interval.value() * 1000
             self.auto_refresh_timer.start(interval_ms)
-            self.status_label.setText(f"Auto-refresh: scanning...")
+            self.status_label.setText("Auto-refresh: scanning...")
             self._do_auto_scan()
         else:
             self.is_auto_refreshing = False
@@ -440,7 +619,6 @@ class AutoCastGUI(QMainWindow):
         threading.Thread(target=do_scan, daemon=True).start()
 
     def _on_devices_found(self, devices: list[Device]):
-        # Preserve selection
         prev_ip = self.selected_device.ip if self.selected_device else None
 
         self.devices = devices
@@ -456,16 +634,10 @@ class AutoCastGUI(QMainWindow):
             name_item = QTableWidgetItem(d.name)
             name_item.setToolTip(d.name)
             self.device_table.setItem(i, 0, name_item)
-
-            type_text = f"{type_icons.get(d.device_type, '')} {d.display_type}"
-            self.device_table.setItem(i, 1, QTableWidgetItem(type_text))
-
-            ip_text = f"{d.ip}:{d.port}"
-            self.device_table.setItem(i, 2, QTableWidgetItem(ip_text))
-
+            self.device_table.setItem(i, 1, QTableWidgetItem(f"{type_icons.get(d.device_type, '')} {d.display_type}"))
+            self.device_table.setItem(i, 2, QTableWidgetItem(f"{d.ip}:{d.port}"))
             self.device_table.setItem(i, 3, QTableWidgetItem("Available"))
 
-            # Restore selection
             if prev_ip and d.ip == prev_ip:
                 self.device_table.selectRow(i)
 
@@ -478,7 +650,16 @@ class AutoCastGUI(QMainWindow):
         else:
             self.scan_count += 1
             next_sec = self.refresh_interval.value()
-            self.status_label.setText(f"Auto-refresh #{self.scan_count}: {len(devices)} device(s) found — next scan in {next_sec}s")
+            self.status_label.setText(f"Auto-refresh #{self.scan_count}: {len(devices)} device(s) — next in {next_sec}s")
+
+    def _on_device_select(self):
+        rows = self.device_table.selectionModel().selectedRows()
+        if rows:
+            idx = rows[0].row()
+            if idx < len(self.devices):
+                self.selected_device = self.devices[idx]
+
+    # ── Media File ───────────────────────────────────────────────────────────
 
     def _on_browse(self):
         ext_list = " ".join(f"*{ext}" for ext in sorted(SUPPORTED_EXTENSIONS))
@@ -492,13 +673,6 @@ class AutoCastGUI(QMainWindow):
             self.media_path_label.setText(name)
             self.media_path_label.setToolTip(filepath)
             self.status_label.setText(f"Selected: {name}")
-
-    def _on_device_select(self):
-        rows = self.device_table.selectionModel().selectedRows()
-        if rows:
-            idx = rows[0].row()
-            if idx < len(self.devices):
-                self.selected_device = self.devices[idx]
 
     def _on_play(self):
         if not self.selected_device:
@@ -533,7 +707,7 @@ class AutoCastGUI(QMainWindow):
                     loop.run_until_complete(airplay_controller.play(device, media_path))
                     self.bridge.status_update.emit(f"Playing on {device.name}")
                 else:
-                    self.bridge.error_occurred.emit(f"Unsupported device type: {device.device_type}")
+                    self.bridge.error_occurred.emit(f"Unsupported: {device.device_type}")
             except Exception as e:
                 self.bridge.error_occurred.emit(str(e))
             finally:
@@ -541,12 +715,161 @@ class AutoCastGUI(QMainWindow):
 
         threading.Thread(target=do_play, daemon=True).start()
 
+    # ── Window Cast ──────────────────────────────────────────────────────────
+
+    def _refresh_windows(self):
+        self.window_list.clear()
+        self.windows_list = list_windows()
+
+        for w in self.windows_list:
+            icon = "📺" if not w.process_name.lower().startswith(("chrome", "firefox", "edge")) else "🌐"
+            item = QListWidgetItem(f"{icon} {w.title}")
+            item.setToolTip(f"Process: {w.process_name}\nPID: {w.pid}\nSize: {w.rect[2]}x{w.rect[3]}")
+            self.window_list.addItem(item)
+
+        self.window_info_label.setText(f"{len(self.windows_list)} window(s) found")
+
+    def _on_window_select(self, index: int):
+        if 0 <= index < len(self.windows_list):
+            w = self.windows_list[index]
+            self.window_info_label.setText(f"{w.process_name} — {w.rect[2]}x{w.rect[3]}")
+
+    def _on_cast_window(self):
+        if not self.selected_device:
+            QMessageBox.warning(self, "Warning", "Please select a target device first.")
+            return
+
+        idx = self.window_list.currentRow()
+        if idx < 0 or idx >= len(self.windows_list):
+            QMessageBox.warning(self, "Warning", "Please select a window to cast.")
+            return
+
+        window = self.windows_list[idx]
+        device = self.selected_device
+        fps = self.fps_slider.value()
+
+        self.status_label.setText(f"Casting '{window.title}' to {device.name}...")
+        self.is_streaming = True
+        self.cast_window_btn.setEnabled(False)
+        self.streamer.fps = fps
+
+        def do_cast():
+            try:
+                self.streamer.start_window(window.hwnd)
+
+                loop = asyncio.new_event_loop()
+                server = MediaServer()
+                loop.run_until_complete(server.start())
+
+                original_handle = self.streamer._handle_media
+                streamer_ref = self.streamer
+
+                async def stream_handle(request):
+                    from aiohttp import web
+                    frame = streamer_ref.get_frame()
+                    if frame:
+                        return web.Response(
+                            body=frame,
+                            content_type="image/jpeg",
+                            headers={"Cache-Control": "no-cache"},
+                        )
+                    return web.Response(status=204)
+
+                server._app.router.add_get("/stream", stream_handle)
+                stream_url = f"http://{server._local_ip}:{server._actual_port}/stream"
+
+                if device.device_type == DeviceType.DLNA:
+                    loop.run_until_complete(dlna_controller.play(device, stream_url, "image/jpeg"))
+                elif device.device_type == DeviceType.AIRPLAY:
+                    pass
+
+                self.bridge.status_update.emit(f"Casting '{window.title}' to {device.name}")
+            except Exception as e:
+                self.bridge.error_occurred.emit(str(e))
+                self.is_streaming = False
+                self.cast_window_btn.setEnabled(True)
+
+        threading.Thread(target=do_cast, daemon=True).start()
+
+    # ── Screen Cast ──────────────────────────────────────────────────────────
+
+    def _refresh_monitors(self):
+        self.monitor_combo.clear()
+        self.monitors_list = get_monitors()
+
+        for m in self.monitors_list:
+            self.monitor_combo.addItem(m["name"])
+
+    def _on_cast_screen(self):
+        if not self.selected_device:
+            QMessageBox.warning(self, "Warning", "Please select a target device first.")
+            return
+
+        idx = self.monitor_combo.currentIndex()
+        if idx < 0:
+            QMessageBox.warning(self, "Warning", "Please select a monitor.")
+            return
+
+        monitor = self.monitors_list[idx]
+        device = self.selected_device
+        fps = self.fps_slider.value()
+
+        self.status_label.setText(f"Casting {monitor['name']} to {device.name}...")
+        self.is_streaming = True
+        self.cast_screen_btn.setEnabled(False)
+        self.streamer.fps = fps
+
+        def do_cast():
+            try:
+                self.streamer.start_monitor(monitor["index"])
+
+                loop = asyncio.new_event_loop()
+                server = MediaServer()
+                loop.run_until_complete(server.start())
+
+                streamer_ref = self.streamer
+
+                async def stream_handle(request):
+                    from aiohttp import web
+                    frame = streamer_ref.get_frame()
+                    if frame:
+                        return web.Response(
+                            body=frame,
+                            content_type="image/jpeg",
+                            headers={"Cache-Control": "no-cache"},
+                        )
+                    return web.Response(status=204)
+
+                server._app.router.add_get("/stream", stream_handle)
+                stream_url = f"http://{server._local_ip}:{server._actual_port}/stream"
+
+                if device.device_type == DeviceType.DLNA:
+                    loop.run_until_complete(dlna_controller.play(device, stream_url, "image/jpeg"))
+                elif device.device_type == DeviceType.AIRPLAY:
+                    pass
+
+                self.bridge.status_update.emit(f"Casting {monitor['name']} to {device.name}")
+            except Exception as e:
+                self.bridge.error_occurred.emit(str(e))
+                self.is_streaming = False
+                self.cast_screen_btn.setEnabled(True)
+
+        threading.Thread(target=do_cast, daemon=True).start()
+
+    # ── Stop & Volume ────────────────────────────────────────────────────────
+
     def _on_stop(self):
         if not self.selected_device:
             return
 
         device = self.selected_device
         self.status_label.setText("Stopping...")
+
+        if self.is_streaming:
+            self.streamer.stop()
+            self.is_streaming = False
+            self.cast_window_btn.setEnabled(True)
+            self.cast_screen_btn.setEnabled(True)
 
         def do_stop():
             try:
@@ -585,12 +908,16 @@ class AutoCastGUI(QMainWindow):
 
         threading.Thread(target=do_volume, daemon=True).start()
 
+    # ── Status ───────────────────────────────────────────────────────────────
+
     def _on_status_update(self, msg: str):
         self.status_label.setText(msg)
 
     def _on_error(self, msg: str):
         self.status_label.setText(f"Error: {msg}")
         self.play_btn.setEnabled(True)
+        self.cast_window_btn.setEnabled(True)
+        self.cast_screen_btn.setEnabled(True)
 
 
 # ── Entry Point ─────────────────────────────────────────────────────────────
