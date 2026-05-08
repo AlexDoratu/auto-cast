@@ -12,8 +12,8 @@ from PySide6.QtWidgets import (
     QCheckBox, QSpinBox, QComboBox, QTabWidget, QListWidget, QListWidgetItem,
     QGraphicsOpacityEffect,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, QSequentialAnimationGroup, QPoint
-from PySide6.QtGui import QColor, QFont, QShortcut, QKeySequence
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, QSequentialAnimationGroup
+from PySide6.QtGui import QColor, QFont, QShortcut, QKeySequence, QIcon
 from PySide6.QtWidgets import QGraphicsDropShadowEffect
 
 from device import Device, DeviceType
@@ -25,7 +25,496 @@ from config import SUPPORTED_EXTENSIONS, MIME_TYPES
 from capture import list_windows, get_monitors, ScreenStreamer
 
 
-# ── Signals Bridge ──────────────────────────────────────────────────────────
+# ── Color Palette ────────────────────────────────────────────────────────────
+
+class C:
+    """Centralized color constants for consistent styling."""
+    BG          = "#0b0b0f"
+    SURFACE     = "#15151a"
+    CARD        = "#1a1a21"
+    CARD_BORDER = "#242430"
+    INPUT_BG    = "#1e1e28"
+    INPUT_BORDER= "#2a2a38"
+    HOVER       = "#22222e"
+    SELECTED    = "#1a2744"
+    TEXT        = "#e8e8ee"
+    TEXT_DIM    = "#7a7a8a"
+    TEXT_MUTED  = "#55556a"
+    ACCENT      = "#38bdf8"
+    ACCENT_DIM  = "#1e3a5f"
+    DANGER      = "#ef4444"
+    DANGER_DIM  = "#7f1d1d"
+    SUCCESS     = "#34d399"
+    PURPLE      = "#a78bfa"
+    PINK        = "#f472b6"
+    PRIMARY     = "#2563eb"
+    PRIMARY_HOV = "#3b82f6"
+    PRIMARY_ACT = "#1d4ed8"
+    PRIMARY_DIS = "#1e3a5f"
+    SEPARATOR   = "#1e1e28"
+
+
+# ── Stylesheet ───────────────────────────────────────────────────────────────
+
+DARK_STYLE = f"""
+/* ── Base ─────────────────────────────────────────────────────────────── */
+
+QMainWindow {{
+    background-color: {C.BG};
+}}
+
+QWidget {{
+    background-color: transparent;
+    color: {C.TEXT};
+    font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+    font-size: 13px;
+}}
+
+QDialog, QMessageBox {{
+    background-color: {C.SURFACE};
+}}
+
+/* ── Cards ────────────────────────────────────────────────────────────── */
+
+QFrame#card {{
+    background-color: {C.CARD};
+    border: 1px solid {C.CARD_BORDER};
+    border-radius: 16px;
+}}
+
+QFrame#statusBar {{
+    background-color: {C.SURFACE};
+    border: 1px solid {C.CARD_BORDER};
+    border-radius: 12px;
+}}
+
+QFrame#separator {{
+    background-color: {C.SEPARATOR};
+    max-height: 1px;
+}}
+
+/* ── Typography ───────────────────────────────────────────────────────── */
+
+QLabel#title {{
+    font-size: 26px;
+    font-weight: 700;
+    color: {C.TEXT};
+    letter-spacing: -0.5px;
+    background: transparent;
+}}
+
+QLabel#subtitle {{
+    color: {C.TEXT_DIM};
+    font-size: 11px;
+    background: transparent;
+}}
+
+QLabel#status {{
+    color: {C.ACCENT};
+    font-weight: 500;
+    font-size: 12px;
+    padding: 0;
+    background: transparent;
+}}
+
+QLabel#sectionTitle {{
+    font-size: 10px;
+    font-weight: 700;
+    color: {C.TEXT_MUTED};
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    background: transparent;
+}}
+
+QLabel#accentLabel {{
+    color: {C.ACCENT};
+    font-size: 12px;
+    font-weight: 600;
+    background: transparent;
+}}
+
+QLabel#emptyState {{
+    color: {C.TEXT_MUTED};
+    font-size: 13px;
+    font-style: italic;
+    background: transparent;
+}}
+
+/* ── Buttons ──────────────────────────────────────────────────────────── */
+
+QPushButton {{
+    background-color: {C.INPUT_BG};
+    color: {C.TEXT};
+    border: 1px solid {C.INPUT_BORDER};
+    border-radius: 10px;
+    padding: 10px 20px;
+    font-weight: 500;
+    font-size: 13px;
+    min-height: 20px;
+}}
+
+QPushButton:hover {{
+    background-color: {C.HOVER};
+    border-color: #3a3a4a;
+    color: #f4f4f8;
+}}
+
+QPushButton:pressed {{
+    background-color: #2a2a38;
+}}
+
+QPushButton:disabled {{
+    background-color: #131318;
+    color: #3a3a4a;
+    border-color: {C.SEPARATOR};
+}}
+
+QPushButton#primaryBtn {{
+    background-color: {C.PRIMARY};
+    color: #ffffff;
+    border: none;
+    font-weight: 600;
+}}
+
+QPushButton#primaryBtn:hover {{
+    background-color: {C.PRIMARY_HOV};
+}}
+
+QPushButton#primaryBtn:pressed {{
+    background-color: {C.PRIMARY_ACT};
+}}
+
+QPushButton#primaryBtn:disabled {{
+    background-color: {C.PRIMARY_DIS};
+    color: #2d4a7a;
+}}
+
+QPushButton#dangerBtn {{
+    background-color: {C.DANGER_DIM};
+    color: #fca5a5;
+    border: 1px solid #991b1b;
+}}
+
+QPushButton#dangerBtn:hover {{
+    background-color: #991b1b;
+    color: #fecaca;
+}}
+
+QPushButton#dangerBtn:pressed {{
+    background-color: {C.DANGER_DIM};
+}}
+
+QPushButton#scanBtn {{
+    background-color: {C.ACCENT_DIM};
+    color: {C.ACCENT};
+    border: 1px solid #1e4d7a;
+    font-weight: 600;
+    padding: 10px 28px;
+    border-radius: 10px;
+    letter-spacing: 0.3px;
+}}
+
+QPushButton#scanBtn:hover {{
+    background-color: #1e4d7a;
+    color: #7dd3fc;
+    border-color: #2563a0;
+}}
+
+QPushButton#scanBtn:pressed {{
+    background-color: #17355a;
+}}
+
+QPushButton#scanningBtn {{
+    background-color: {C.ACCENT_DIM};
+    color: {C.ACCENT};
+    border: 1px solid #1e4d7a;
+    font-weight: 600;
+}}
+
+QPushButton#iconBtn {{
+    background-color: transparent;
+    border: 1px solid {C.INPUT_BORDER};
+    padding: 6px 10px;
+    font-size: 14px;
+    border-radius: 8px;
+    min-width: 32px;
+}}
+
+QPushButton#iconBtn:hover {{
+    background-color: {C.HOVER};
+    border-color: #3a3a4a;
+}}
+
+/* ── Table ────────────────────────────────────────────────────────────── */
+
+QTableWidget {{
+    background-color: {C.CARD};
+    border: 1px solid {C.CARD_BORDER};
+    border-radius: 12px;
+    gridline-color: transparent;
+    selection-background-color: transparent;
+    outline: none;
+}}
+
+QTableWidget::item {{
+    padding: 12px 10px;
+    border-bottom: 1px solid #181820;
+    color: {C.TEXT};
+}}
+
+QTableWidget::item:selected {{
+    background-color: {C.SELECTED};
+    color: #e4e4e7;
+    border-left: 2px solid {C.ACCENT};
+    border-bottom: 1px solid {C.SELECTED};
+}}
+
+QTableWidget::item:hover {{
+    background-color: {C.HOVER};
+}}
+
+QTableWidget::item:selected:hover {{
+    background-color: {C.SELECTED};
+}}
+
+QHeaderView::section {{
+    background-color: {C.CARD};
+    color: {C.TEXT_MUTED};
+    padding: 12px 10px;
+    border: none;
+    border-bottom: 1px solid {C.SEPARATOR};
+    font-weight: 700;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+}}
+
+/* ── List ─────────────────────────────────────────────────────────────── */
+
+QListWidget {{
+    background-color: {C.CARD};
+    border: 1px solid {C.CARD_BORDER};
+    border-radius: 12px;
+    padding: 4px;
+    outline: none;
+}}
+
+QListWidget::item {{
+    padding: 10px 12px;
+    border-bottom: 1px solid #181820;
+    border-radius: 8px;
+    color: {C.TEXT};
+}}
+
+QListWidget::item:selected {{
+    background-color: {C.SELECTED};
+    color: #e4e4e7;
+}}
+
+QListWidget::item:hover {{
+    background-color: {C.HOVER};
+}}
+
+/* ── Slider ───────────────────────────────────────────────────────────── */
+
+QSlider::groove:horizontal {{
+    height: 4px;
+    background: {C.SEPARATOR};
+    border-radius: 2px;
+}}
+
+QSlider::handle:horizontal {{
+    background: {C.TEXT};
+    width: 16px;
+    height: 16px;
+    margin: -6px 0;
+    border-radius: 8px;
+}}
+
+QSlider::handle:horizontal:hover {{
+    background: {C.ACCENT};
+}}
+
+QSlider::sub-page:horizontal {{
+    background: {C.PRIMARY};
+    border-radius: 2px;
+}}
+
+/* ── Checkbox ─────────────────────────────────────────────────────────── */
+
+QCheckBox {{
+    color: {C.TEXT};
+    spacing: 8px;
+    background: transparent;
+}}
+
+QCheckBox::indicator {{
+    width: 16px;
+    height: 16px;
+    border: 2px solid #3a3a4a;
+    border-radius: 4px;
+    background-color: transparent;
+}}
+
+QCheckBox::indicator:hover {{
+    border-color: #52525b;
+}}
+
+QCheckBox::indicator:checked {{
+    background-color: {C.PRIMARY};
+    border-color: {C.PRIMARY};
+}}
+
+/* ── SpinBox ──────────────────────────────────────────────────────────── */
+
+QSpinBox {{
+    background-color: {C.INPUT_BG};
+    border: 1px solid {C.INPUT_BORDER};
+    border-radius: 8px;
+    padding: 6px 10px;
+    color: {C.TEXT};
+}}
+
+QSpinBox:focus {{
+    border-color: {C.ACCENT};
+}}
+
+QSpinBox::up-button, QSpinBox::down-button {{
+    background-color: {C.HOVER};
+    border: none;
+    width: 20px;
+}}
+
+/* ── ComboBox ─────────────────────────────────────────────────────────── */
+
+QComboBox {{
+    background-color: {C.INPUT_BG};
+    border: 1px solid {C.INPUT_BORDER};
+    border-radius: 10px;
+    padding: 8px 14px;
+    color: {C.TEXT};
+    min-height: 20px;
+}}
+
+QComboBox:hover {{
+    border-color: #3a3a4a;
+}}
+
+QComboBox:focus {{
+    border-color: {C.ACCENT};
+}}
+
+QComboBox::drop-down {{
+    border: none;
+    width: 30px;
+}}
+
+QComboBox::down-arrow {{
+    image: none;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid {C.TEXT_DIM};
+    margin-right: 10px;
+}}
+
+QComboBox QAbstractItemView {{
+    background-color: {C.SURFACE};
+    border: 1px solid {C.INPUT_BORDER};
+    color: {C.TEXT};
+    selection-background-color: {C.SELECTED};
+    selection-color: #e4e4e7;
+    border-radius: 10px;
+    padding: 4px;
+}}
+
+/* ── Tabs ─────────────────────────────────────────────────────────────── */
+
+QTabWidget::pane {{
+    border: 1px solid {C.CARD_BORDER};
+    border-radius: 12px;
+    background-color: {C.CARD};
+    top: -1px;
+}}
+
+QTabBar {{
+    background: transparent;
+}}
+
+QTabBar::tab {{
+    background-color: transparent;
+    color: {C.TEXT_DIM};
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 10px 22px;
+    margin-right: 2px;
+    font-weight: 500;
+    font-size: 13px;
+}}
+
+QTabBar::tab:selected {{
+    color: {C.ACCENT};
+    font-weight: 600;
+    border-bottom: 2px solid {C.ACCENT};
+}}
+
+QTabBar::tab:hover:!selected {{
+    color: #b0b0bc;
+    border-bottom: 2px solid {C.INPUT_BORDER};
+}}
+
+/* ── Scrollbar ────────────────────────────────────────────────────────── */
+
+QScrollBar:vertical {{
+    background: transparent;
+    width: 6px;
+    margin: 0;
+}}
+
+QScrollBar::handle:vertical {{
+    background: {C.INPUT_BORDER};
+    border-radius: 3px;
+    min-height: 30px;
+}}
+
+QScrollBar::handle:vertical:hover {{
+    background: #3a3a4a;
+}}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+    height: 0;
+}}
+
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+    background: transparent;
+}}
+
+QScrollBar:horizontal {{
+    background: transparent;
+    height: 6px;
+    margin: 0;
+}}
+
+QScrollBar::handle:horizontal {{
+    background: {C.INPUT_BORDER};
+    border-radius: 3px;
+    min-width: 30px;
+}}
+
+QScrollBar::handle:horizontal:hover {{
+    background: #3a3a4a;
+}}
+
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+    width: 0;
+}}
+
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+    background: transparent;
+}}
+"""
+
+
+# ── Signals Bridge ────────────────────────────────────────────────────────────
 
 class SignalBridge(QObject):
     devices_found = Signal(list)
@@ -33,10 +522,10 @@ class SignalBridge(QObject):
     error_occurred = Signal(str)
 
 
-# ── Animation Helpers ──────────────────────────────────────────────────────
+# ── Animation Helpers ─────────────────────────────────────────────────────────
 
 class FadeLabel(QLabel):
-    """Label with fade-in + slide-up animation when text changes."""
+    """Label with fade-in animation when text changes."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -94,7 +583,7 @@ class ScanAnimation(QObject):
         super().__init__(button)
         self._btn = button
         self._glow = QGraphicsDropShadowEffect(button)
-        self._glow.setColor(QColor("#38bdf8"))
+        self._glow.setColor(QColor(C.ACCENT))
         self._glow.setOffset(0, 0)
         self._glow.setBlurRadius(0)
         button.setGraphicsEffect(self._glow)
@@ -125,438 +614,12 @@ class ScanAnimation(QObject):
     def stop(self):
         self._group.stop()
         self._glow.setBlurRadius(0)
-        self._btn.setObjectName("")
+        self._btn.setObjectName("scanBtn")
         self._btn.style().unpolish(self._btn)
         self._btn.style().polish(self._btn)
 
 
-# ── Styles ──────────────────────────────────────────────────────────────────
-
-DARK_STYLE = """
-/* ── Base ─────────────────────────────────────────────────────────── */
-
-QMainWindow {
-    background-color: #0a0a0c;
-}
-
-QWidget {
-    background-color: #0a0a0c;
-    color: #e2e2e8;
-    font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
-    font-size: 13px;
-}
-
-/* ── Cards ────────────────────────────────────────────────────────── */
-
-QFrame#card {
-    background-color: #141418;
-    border: 1px solid #1e1e24;
-    border-top: 1px solid #28282f;
-    border-radius: 14px;
-    padding: 20px;
-}
-
-QFrame#statusBar {
-    background-color: #121216;
-    border: 1px solid #1e1e24;
-    border-radius: 10px;
-    padding: 8px 16px;
-}
-
-QFrame#separator {
-    background-color: #1e1e24;
-    max-height: 1px;
-}
-
-/* ── Typography ──────────────────────────────────────────────────── */
-
-QLabel#title {
-    font-size: 24px;
-    font-weight: 700;
-    color: #f0f0f4;
-    letter-spacing: -0.5px;
-}
-
-QLabel#subtitle {
-    color: #6b6b78;
-    font-size: 11px;
-}
-
-QLabel#status {
-    color: #38bdf8;
-    font-weight: 500;
-    font-size: 12px;
-    padding: 8px 0 0 0;
-}
-
-QLabel#sectionTitle {
-    font-size: 11px;
-    font-weight: 600;
-    color: #6b6b78;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-}
-
-QLabel#accentLabel {
-    color: #38bdf8;
-    font-size: 12px;
-    font-weight: 500;
-}
-
-QLabel#emptyState {
-    color: #4a4a55;
-    font-size: 13px;
-    font-style: italic;
-}
-
-/* ── Buttons ─────────────────────────────────────────────────────── */
-
-QPushButton {
-    background-color: #1e1e24;
-    color: #e2e2e8;
-    border: 1px solid #28282f;
-    border-radius: 8px;
-    padding: 9px 18px;
-    font-weight: 500;
-    font-size: 13px;
-    min-height: 18px;
-}
-
-QPushButton:hover {
-    background-color: #28282f;
-    border-color: #3a3a44;
-    color: #f0f0f4;
-}
-
-QPushButton:pressed {
-    background-color: #3a3a44;
-}
-
-QPushButton:disabled {
-    background-color: #161618;
-    color: #3a3a44;
-    border-color: #1e1e24;
-}
-
-QPushButton#primaryBtn {
-    background-color: #2563eb;
-    color: #ffffff;
-    border: none;
-    font-weight: 600;
-}
-
-QPushButton#primaryBtn:hover {
-    background-color: #3b82f6;
-}
-
-QPushButton#primaryBtn:pressed {
-    background-color: #1d4ed8;
-}
-
-QPushButton#primaryBtn:disabled {
-    background-color: #1e3a5f;
-    color: #2d4a7a;
-}
-
-QPushButton#dangerBtn {
-    background-color: #7f1d1d;
-    color: #fca5a5;
-    border: 1px solid #991b1b;
-}
-
-QPushButton#dangerBtn:hover {
-    background-color: #991b1b;
-    color: #fecaca;
-}
-
-QPushButton#dangerBtn:pressed {
-    background-color: #7f1d1d;
-}
-
-QPushButton#scanningBtn {
-    background-color: #172554;
-    color: #38bdf8;
-    border: 1px solid #1e3a5f;
-    font-weight: 600;
-}
-
-QPushButton#secondaryBtn {
-    background-color: transparent;
-    border: 1px solid #28282f;
-    color: #8a8a96;
-}
-
-QPushButton#secondaryBtn:hover {
-    background-color: #1e1e24;
-    border-color: #3a3a44;
-    color: #b0b0bc;
-}
-
-/* ── Table ───────────────────────────────────────────────────────── */
-
-QTableWidget {
-    background-color: #141418;
-    border: 1px solid #1e1e24;
-    border-radius: 10px;
-    gridline-color: transparent;
-    selection-background-color: transparent;
-    outline: none;
-}
-
-QTableWidget::item {
-    padding: 12px 10px;
-    border-bottom: 1px solid #1a1a20;
-    color: #e2e2e8;
-}
-
-QTableWidget::item:selected {
-    background-color: #172554;
-    color: #e4e4e7;
-    border-left: 2px solid #38bdf8;
-    border-bottom: 1px solid #172554;
-}
-
-QTableWidget::item:hover {
-    background-color: #1a1a20;
-}
-
-QTableWidget::item:selected:hover {
-    background-color: #172554;
-}
-
-QHeaderView::section {
-    background-color: #141418;
-    color: #6b6b78;
-    padding: 12px 10px;
-    border: none;
-    border-bottom: 1px solid #1e1e24;
-    font-weight: 600;
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-}
-
-/* ── List ────────────────────────────────────────────────────────── */
-
-QListWidget {
-    background-color: #141418;
-    border: 1px solid #1e1e24;
-    border-radius: 10px;
-    padding: 4px;
-    outline: none;
-}
-
-QListWidget::item {
-    padding: 10px 12px;
-    border-bottom: 1px solid #1a1a20;
-    border-radius: 6px;
-    color: #e2e2e8;
-}
-
-QListWidget::item:selected {
-    background-color: #172554;
-    color: #e4e4e7;
-}
-
-QListWidget::item:hover {
-    background-color: #1e1e24;
-}
-
-/* ── Slider ──────────────────────────────────────────────────────── */
-
-QSlider::groove:horizontal {
-    height: 4px;
-    background: #1e1e24;
-    border-radius: 2px;
-}
-
-QSlider::handle:horizontal {
-    background: #e2e2e8;
-    width: 16px;
-    height: 16px;
-    margin: -6px 0;
-    border-radius: 8px;
-}
-
-QSlider::handle:horizontal:hover {
-    background: #38bdf8;
-}
-
-QSlider::sub-page:horizontal {
-    background: #2563eb;
-    border-radius: 2px;
-}
-
-/* ── Checkbox ────────────────────────────────────────────────────── */
-
-QCheckBox {
-    color: #e2e2e8;
-    spacing: 8px;
-}
-
-QCheckBox::indicator {
-    width: 16px;
-    height: 16px;
-    border: 2px solid #3a3a44;
-    border-radius: 4px;
-    background-color: transparent;
-}
-
-QCheckBox::indicator:hover {
-    border-color: #52525b;
-}
-
-QCheckBox::indicator:checked {
-    background-color: #2563eb;
-    border-color: #2563eb;
-}
-
-/* ── SpinBox ─────────────────────────────────────────────────────── */
-
-QSpinBox {
-    background-color: #1e1e24;
-    border: 1px solid #28282f;
-    border-radius: 6px;
-    padding: 5px 8px;
-    color: #e2e2e8;
-}
-
-QSpinBox:focus {
-    border-color: #38bdf8;
-}
-
-QSpinBox::up-button, QSpinBox::down-button {
-    background-color: #28282f;
-    border: none;
-    width: 18px;
-}
-
-/* ── ComboBox ────────────────────────────────────────────────────── */
-
-QComboBox {
-    background-color: #1e1e24;
-    border: 1px solid #28282f;
-    border-radius: 8px;
-    padding: 7px 12px;
-    color: #e2e2e8;
-    min-height: 18px;
-}
-
-QComboBox:hover {
-    border-color: #3a3a44;
-}
-
-QComboBox:focus {
-    border-color: #38bdf8;
-}
-
-QComboBox::drop-down {
-    border: none;
-    width: 28px;
-}
-
-QComboBox::down-arrow {
-    image: none;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 5px solid #6b6b78;
-    margin-right: 8px;
-}
-
-QComboBox QAbstractItemView {
-    background-color: #1a1a20;
-    border: 1px solid #28282f;
-    color: #e2e2e8;
-    selection-background-color: #172554;
-    selection-color: #e4e4e7;
-    border-radius: 8px;
-    padding: 4px;
-}
-
-/* ── Tabs ────────────────────────────────────────────────────────── */
-
-QTabWidget::pane {
-    border: 1px solid #1e1e24;
-    border-radius: 10px;
-    background-color: #141418;
-    top: -1px;
-}
-
-QTabBar::tab {
-    background-color: transparent;
-    color: #6b6b78;
-    border: none;
-    border-bottom: 2px solid transparent;
-    padding: 10px 20px;
-    margin-right: 4px;
-    font-weight: 500;
-    font-size: 13px;
-}
-
-QTabBar::tab:selected {
-    color: #38bdf8;
-    font-weight: 600;
-    border-bottom: 2px solid #38bdf8;
-}
-
-QTabBar::tab:hover:!selected {
-    color: #b0b0bc;
-    border-bottom: 2px solid #28282f;
-}
-
-/* ── Scrollbar ───────────────────────────────────────────────────── */
-
-QScrollBar:vertical {
-    background: transparent;
-    width: 6px;
-    margin: 0;
-}
-
-QScrollBar::handle:vertical {
-    background: #28282f;
-    border-radius: 3px;
-    min-height: 30px;
-}
-
-QScrollBar::handle:vertical:hover {
-    background: #3a3a44;
-}
-
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-    height: 0;
-}
-
-QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-    background: transparent;
-}
-
-QScrollBar:horizontal {
-    background: transparent;
-    height: 6px;
-    margin: 0;
-}
-
-QScrollBar::handle:horizontal {
-    background: #28282f;
-    border-radius: 3px;
-    min-width: 30px;
-}
-
-QScrollBar::handle:horizontal:hover {
-    background: #3a3a44;
-}
-
-QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-    width: 0;
-}
-
-QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
-    background: transparent;
-}
-"""
-
-
-# ── Main Window ─────────────────────────────────────────────────────────────
+# ── Main Window ───────────────────────────────────────────────────────────────
 
 class AutoCastGUI(QMainWindow):
     def __init__(self):
@@ -584,7 +647,7 @@ class AutoCastGUI(QMainWindow):
         self._connect_signals()
         self._refresh_windows()
 
-    # ── UI Construction ─────────────────────────────────────────────────────
+    # ── UI Construction ───────────────────────────────────────────────────────
 
     def _init_ui(self):
         self.setWindowTitle("Auto-Cast")
@@ -595,7 +658,7 @@ class AutoCastGUI(QMainWindow):
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
         main_layout.setSpacing(16)
-        main_layout.setContentsMargins(24, 24, 24, 20)
+        main_layout.setContentsMargins(24, 20, 24, 20)
 
         self._build_header(main_layout)
         self._build_content(main_layout)
@@ -603,8 +666,9 @@ class AutoCastGUI(QMainWindow):
 
     def _build_header(self, parent: QVBoxLayout):
         header = QHBoxLayout()
-        header.setSpacing(12)
+        header.setSpacing(16)
 
+        # Title
         title_col = QVBoxLayout()
         title_col.setSpacing(2)
         title = QLabel("Auto-Cast")
@@ -615,6 +679,25 @@ class AutoCastGUI(QMainWindow):
         title_col.addWidget(subtitle)
         header.addLayout(title_col)
         header.addStretch()
+
+        # Scan button — prominent in header
+        self.scan_btn = QPushButton("  Scan Devices")
+        self.scan_btn.setObjectName("scanBtn")
+        self.scan_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.scan_btn.setMinimumWidth(140)
+        header.addWidget(self.scan_btn)
+
+        # Auto-refresh toggle
+        self.auto_refresh_cb = QCheckBox("Auto")
+        self.auto_refresh_cb.setToolTip("Auto-refresh device list")
+        self.refresh_interval = QSpinBox()
+        self.refresh_interval.setRange(3, 60)
+        self.refresh_interval.setValue(10)
+        self.refresh_interval.setSuffix("s")
+        self.refresh_interval.setFixedWidth(64)
+        self.refresh_interval.setToolTip("Refresh interval")
+        header.addWidget(self.auto_refresh_cb)
+        header.addWidget(self.refresh_interval)
 
         parent.addLayout(header)
 
@@ -630,32 +713,12 @@ class AutoCastGUI(QMainWindow):
         panel.setObjectName("card")
         layout = QVBoxLayout(panel)
         layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 16)
 
-        # Row 1: Title + Scan
-        row1 = QHBoxLayout()
-        row1.setSpacing(8)
+        # Section title
         label = QLabel("DEVICES")
         label.setObjectName("sectionTitle")
-        self.scan_btn = QPushButton("  Scan")
-        self.scan_btn.setMinimumWidth(90)
-        row1.addWidget(label)
-        row1.addStretch()
-        row1.addWidget(self.scan_btn)
-        layout.addLayout(row1)
-
-        # Row 2: Auto-refresh controls
-        row2 = QHBoxLayout()
-        row2.setSpacing(8)
-        self.auto_refresh_cb = QCheckBox("Auto-refresh")
-        self.refresh_interval = QSpinBox()
-        self.refresh_interval.setRange(3, 60)
-        self.refresh_interval.setValue(10)
-        self.refresh_interval.setSuffix("s")
-        self.refresh_interval.setFixedWidth(70)
-        row2.addWidget(self.auto_refresh_cb)
-        row2.addWidget(self.refresh_interval)
-        row2.addStretch()
-        layout.addLayout(row2)
+        layout.addWidget(label)
 
         # Device table
         self.device_table = QTableWidget()
@@ -687,6 +750,7 @@ class AutoCastGUI(QMainWindow):
         panel.setObjectName("card")
         layout = QVBoxLayout(panel)
         layout.setSpacing(12)
+        layout.setContentsMargins(20, 16, 20, 16)
 
         self.tabs = AnimatedTabWidget()
         self.tabs.addTab(self._build_media_tab(), "Media File")
@@ -705,8 +769,10 @@ class AutoCastGUI(QMainWindow):
         btn_row.setSpacing(10)
         self.play_btn = QPushButton("  Play")
         self.play_btn.setObjectName("primaryBtn")
+        self.play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.stop_btn = QPushButton("  Stop")
         self.stop_btn.setObjectName("dangerBtn")
+        self.stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_row.addWidget(self.play_btn)
         btn_row.addWidget(self.stop_btn)
         layout.addLayout(btn_row)
@@ -753,6 +819,7 @@ class AutoCastGUI(QMainWindow):
         layout.addWidget(self.media_path_label)
 
         self.browse_btn = QPushButton("  Browse...")
+        self.browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         layout.addWidget(self.browse_btn)
         layout.addStretch()
         return tab
@@ -767,7 +834,8 @@ class AutoCastGUI(QMainWindow):
         header.addStretch()
         self.refresh_windows_btn = QPushButton("Refresh")
         self.refresh_windows_btn.setMinimumWidth(75)
-        self.refresh_windows_btn.setObjectName("secondaryBtn")
+        self.refresh_windows_btn.setObjectName("iconBtn")
+        self.refresh_windows_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         header.addWidget(self.refresh_windows_btn)
         layout.addLayout(header)
 
@@ -781,6 +849,7 @@ class AutoCastGUI(QMainWindow):
 
         self.cast_window_btn = QPushButton("Cast Window")
         self.cast_window_btn.setObjectName("primaryBtn")
+        self.cast_window_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         layout.addWidget(self.cast_window_btn)
         layout.addStretch()
         return tab
@@ -791,17 +860,17 @@ class AutoCastGUI(QMainWindow):
         layout.setSpacing(12)
         layout.setContentsMargins(16, 16, 16, 16)
 
-        # Monitor selector
         monitor_label = QLabel("MONITOR")
         monitor_label.setObjectName("sectionTitle")
         layout.addWidget(monitor_label)
 
         self.monitor_combo = QComboBox()
-        self.monitor_combo.setFixedHeight(38)
+        self.monitor_combo.setFixedHeight(40)
         layout.addWidget(self.monitor_combo)
 
         self.refresh_monitors_btn = QPushButton("Refresh Monitors")
-        self.refresh_monitors_btn.setObjectName("secondaryBtn")
+        self.refresh_monitors_btn.setObjectName("iconBtn")
+        self.refresh_monitors_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         layout.addWidget(self.refresh_monitors_btn)
 
         layout.addSpacing(4)
@@ -822,6 +891,7 @@ class AutoCastGUI(QMainWindow):
 
         self.cast_screen_btn = QPushButton("Cast Screen")
         self.cast_screen_btn.setObjectName("primaryBtn")
+        self.cast_screen_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         layout.addWidget(self.cast_screen_btn)
         layout.addStretch()
         return tab
@@ -830,16 +900,16 @@ class AutoCastGUI(QMainWindow):
         frame = QFrame()
         frame.setObjectName("statusBar")
         shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(12)
-        shadow.setColor(QColor(0, 0, 0, 30))
+        shadow.setBlurRadius(16)
+        shadow.setColor(QColor(0, 0, 0, 40))
         shadow.setOffset(0, 2)
         frame.setGraphicsEffect(shadow)
 
         layout = QHBoxLayout(frame)
-        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setContentsMargins(16, 8, 16, 8)
 
         dot = QLabel("●")
-        dot.setStyleSheet("color: #38bdf8; font-size: 8px;")
+        dot.setStyleSheet(f"color: {C.ACCENT}; font-size: 8px; background: transparent;")
         layout.addWidget(dot)
 
         self.status_label = FadeLabel("Ready")
@@ -849,7 +919,7 @@ class AutoCastGUI(QMainWindow):
 
         parent.addWidget(frame)
 
-    # ── UI Helpers ──────────────────────────────────────────────────────────
+    # ── UI Helpers ─────────────────────────────────────────────────────────────
 
     @staticmethod
     def _make_separator() -> QFrame:
@@ -923,7 +993,7 @@ class AutoCastGUI(QMainWindow):
         anim.start()
         self._table_fade = anim
 
-    # ── Signal Wiring ───────────────────────────────────────────────────────
+    # ── Signal Wiring ──────────────────────────────────────────────────────────
 
     def _connect_signals(self):
         # Scanning
@@ -959,14 +1029,14 @@ class AutoCastGUI(QMainWindow):
         QShortcut(QKeySequence("F5"), self, self._on_scan)
         QShortcut(QKeySequence("Ctrl+Q"), self, self.close)
 
-    # ── Device Scanning ─────────────────────────────────────────────────────
+    # ── Device Scanning ───────────────────────────────────────────────────────
 
     def _on_auto_refresh_toggle(self, checked: bool):
         if checked:
             self.is_auto_refreshing = True
             self.scan_count = 0
             self.scan_btn.setEnabled(False)
-            self.scan_btn.setText("Auto...")
+            self.scan_btn.setText("  Scanning...")
             self._scan_anim.start()
             self.auto_refresh_timer.start(self.refresh_interval.value() * 1000)
             self.status_label.setText("Auto-refresh enabled")
@@ -976,7 +1046,7 @@ class AutoCastGUI(QMainWindow):
             self._scan_anim.stop()
             self.auto_refresh_timer.stop()
             self.scan_btn.setEnabled(True)
-            self.scan_btn.setText("  Scan")
+            self.scan_btn.setText("  Scan Devices")
             self.status_label.setText("Auto-refresh disabled")
 
     def _on_interval_change(self, value: int):
@@ -998,7 +1068,7 @@ class AutoCastGUI(QMainWindow):
 
     def _on_scan(self):
         self.scan_btn.setEnabled(False)
-        self.scan_btn.setText("Scanning...")
+        self.scan_btn.setText("  Scanning...")
         self._scan_anim.start()
         self.status_label.setText("Scanning for devices...")
 
@@ -1019,9 +1089,9 @@ class AutoCastGUI(QMainWindow):
         self.device_table.setRowCount(len(devices))
 
         type_colors = {
-            DeviceType.DLNA: QColor("#38bdf8"),
-            DeviceType.AIRPLAY: QColor("#a78bfa"),
-            DeviceType.CHROMECAST: QColor("#f472b6"),
+            DeviceType.DLNA: QColor(C.ACCENT),
+            DeviceType.AIRPLAY: QColor(C.PURPLE),
+            DeviceType.CHROMECAST: QColor(C.PINK),
         }
 
         for i, d in enumerate(devices):
@@ -1030,14 +1100,14 @@ class AutoCastGUI(QMainWindow):
             self.device_table.setItem(i, 0, name_item)
 
             type_item = QTableWidgetItem(d.display_type)
-            type_item.setForeground(type_colors.get(d.device_type, QColor("#e2e2e8")))
+            type_item.setForeground(type_colors.get(d.device_type, QColor(C.TEXT)))
             type_item.setFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
             self.device_table.setItem(i, 1, type_item)
 
             self.device_table.setItem(i, 2, QTableWidgetItem(f"{d.ip}:{d.port}"))
 
             status_item = QTableWidgetItem("● Online")
-            status_item.setForeground(QColor("#34d399"))
+            status_item.setForeground(QColor(C.SUCCESS))
             self.device_table.setItem(i, 3, status_item)
 
             if prev_ip and d.ip == prev_ip:
@@ -1050,7 +1120,7 @@ class AutoCastGUI(QMainWindow):
         if not self.is_auto_refreshing:
             self._scan_anim.stop()
             self.scan_btn.setEnabled(True)
-            self.scan_btn.setText("  Scan")
+            self.scan_btn.setText("  Scan Devices")
             self.status_label.setText(f"Found {len(devices)} device(s)")
         else:
             self.scan_count += 1
@@ -1064,7 +1134,7 @@ class AutoCastGUI(QMainWindow):
             if idx < len(self.devices):
                 self.selected_device = self.devices[idx]
 
-    # ── Media File ──────────────────────────────────────────────────────────
+    # ── Media File ─────────────────────────────────────────────────────────────
 
     def _on_browse(self):
         self._animate_button_click(self.browse_btn)
@@ -1146,7 +1216,7 @@ class AutoCastGUI(QMainWindow):
 
         threading.Thread(target=do_play, daemon=True).start()
 
-    # ── Streaming (shared) ──────────────────────────────────────────────────
+    # ── Streaming (shared) ────────────────────────────────────────────────────
 
     def _start_stream(self, source_type: str, source_id, device: Device, label: str):
         fps = self.fps_slider.value()
@@ -1207,7 +1277,7 @@ class AutoCastGUI(QMainWindow):
 
         threading.Thread(target=do_cast, daemon=True).start()
 
-    # ── Window Cast ─────────────────────────────────────────────────────────
+    # ── Window Cast ───────────────────────────────────────────────────────────
 
     def _refresh_windows(self):
         self.window_list.clear()
@@ -1218,7 +1288,7 @@ class AutoCastGUI(QMainWindow):
             item = QListWidgetItem(f"{icon}  {w.title}")
             item.setToolTip(f"Process: {w.process_name}\nPID: {w.pid}\nSize: {w.rect[2]}x{w.rect[3]}")
             if is_browser:
-                item.setForeground(QColor("#38bdf8"))
+                item.setForeground(QColor(C.ACCENT))
             self.window_list.addItem(item)
         self.window_info_label.setText(f"{len(self.windows_list)} window(s)")
 
@@ -1242,7 +1312,7 @@ class AutoCastGUI(QMainWindow):
         self.status_label.setText(f"Casting '{window.title}'...")
         self._start_stream("window", window.hwnd, self.selected_device, f"'{window.title}'")
 
-    # ── Screen Cast ─────────────────────────────────────────────────────────
+    # ── Screen Cast ───────────────────────────────────────────────────────────
 
     def _refresh_monitors(self):
         self.monitor_combo.clear()
@@ -1265,7 +1335,7 @@ class AutoCastGUI(QMainWindow):
         self.status_label.setText(f"Casting {monitor['name']}...")
         self._start_stream("monitor", monitor["index"], self.selected_device, monitor["name"])
 
-    # ── Stop & Volume ───────────────────────────────────────────────────────
+    # ── Stop & Volume ─────────────────────────────────────────────────────────
 
     def _on_stop(self):
         self._animate_button_click(self.stop_btn)
@@ -1325,7 +1395,7 @@ class AutoCastGUI(QMainWindow):
             self.bitrate_value.setText(f"{kbps} KB/s")
         self.streamer.bitrate_limit = kbps
 
-    # ── Status ──────────────────────────────────────────────────────────────
+    # ── Status ────────────────────────────────────────────────────────────────
 
     def _on_status_update(self, msg: str):
         self.status_label.setText(msg)
@@ -1337,7 +1407,7 @@ class AutoCastGUI(QMainWindow):
         self.cast_screen_btn.setEnabled(True)
 
 
-# ── Entry Point ─────────────────────────────────────────────────────────────
+# ── Entry Point ───────────────────────────────────────────────────────────────
 
 def main():
     app = QApplication(sys.argv)
