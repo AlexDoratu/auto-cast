@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QTableWidget, QTableWidgetItem,
     QHeaderView, QSlider, QFrame, QProgressBar, QSizePolicy, QMessageBox,
+    QCheckBox, QSpinBox,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, QThread
 from PySide6.QtGui import QFont, QColor, QPalette, QIcon, QPainter, QLinearGradient
@@ -27,26 +28,6 @@ class SignalBridge(QObject):
     devices_found = Signal(list)
     status_update = Signal(str)
     error_occurred = Signal(str)
-
-
-# ── Async Worker ────────────────────────────────────────────────────────────
-
-class AsyncWorker(threading.Thread):
-    def __init__(self, coro, callback=None, error_callback=None):
-        super().__init__(daemon=True)
-        self._coro = coro
-        self._callback = callback
-        self._error_callback = error_callback
-
-    def run(self):
-        try:
-            loop = asyncio.new_event_loop()
-            result = loop.run_until_complete(self._coro)
-            if self._callback:
-                self._callback(result)
-        except Exception as e:
-            if self._error_callback:
-                self._error_callback(str(e))
 
 
 # ── Styles ──────────────────────────────────────────────────────────────────
@@ -189,6 +170,38 @@ QFrame#separator {
     background-color: #0f3460;
     max-height: 1px;
 }
+
+QCheckBox {
+    color: #e0e0e0;
+    spacing: 8px;
+}
+
+QCheckBox::indicator {
+    width: 18px;
+    height: 18px;
+    border: 2px solid #0f3460;
+    border-radius: 4px;
+    background-color: #16213e;
+}
+
+QCheckBox::indicator:checked {
+    background-color: #e94560;
+    border-color: #e94560;
+}
+
+QSpinBox {
+    background-color: #16213e;
+    border: 1px solid #0f3460;
+    border-radius: 6px;
+    padding: 4px 8px;
+    color: #e0e0e0;
+}
+
+QSpinBox::up-button, QSpinBox::down-button {
+    background-color: #0f3460;
+    border: none;
+    width: 20px;
+}
 """
 
 
@@ -204,13 +217,18 @@ class AutoCastGUI(QMainWindow):
         self.is_playing = False
         self.bridge = SignalBridge()
 
+        # Auto-refresh timer
+        self.auto_refresh_timer = QTimer()
+        self.auto_refresh_timer.timeout.connect(self._do_auto_scan)
+        self.is_auto_refreshing = False
+
         self._init_ui()
         self._connect_signals()
 
     def _init_ui(self):
         self.setWindowTitle("Auto-Cast")
-        self.setMinimumSize(900, 650)
-        self.resize(1000, 700)
+        self.setMinimumSize(1000, 700)
+        self.resize(1100, 750)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -244,34 +262,53 @@ class AutoCastGUI(QMainWindow):
         left_panel.setObjectName("card")
         left_layout = QVBoxLayout(left_panel)
 
+        # Device header with scan controls
         device_header = QHBoxLayout()
         device_label = QLabel("Devices")
         device_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #e94560;")
+
+        self.auto_refresh_cb = QCheckBox("Auto Refresh")
+        self.auto_refresh_cb.setToolTip("Continuously scan for devices")
+        self.refresh_interval = QSpinBox()
+        self.refresh_interval.setRange(3, 60)
+        self.refresh_interval.setValue(10)
+        self.refresh_interval.setSuffix(" sec")
+        self.refresh_interval.setFixedWidth(80)
+        self.refresh_interval.setToolTip("Scan interval in seconds")
+
         self.scan_btn = QPushButton("Scan")
         self.scan_btn.setFixedWidth(100)
+
         device_header.addWidget(device_label)
         device_header.addStretch()
+        device_header.addWidget(self.auto_refresh_cb)
+        device_header.addWidget(self.refresh_interval)
         device_header.addWidget(self.scan_btn)
         left_layout.addLayout(device_header)
 
+        # Device table — wider columns
         self.device_table = QTableWidget()
         self.device_table.setColumnCount(4)
-        self.device_table.setHorizontalHeaderLabels(["Name", "Type", "IP", "Status"])
+        self.device_table.setHorizontalHeaderLabels(["Name", "Type", "IP Address", "Status"])
         self.device_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.device_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.device_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.device_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.device_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        self.device_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.device_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.device_table.setColumnWidth(1, 120)
+        self.device_table.setColumnWidth(2, 180)
+        self.device_table.setColumnWidth(3, 100)
         self.device_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.device_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.device_table.verticalHeader().setVisible(False)
         self.device_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.device_table.setMinimumHeight(200)
         left_layout.addWidget(self.device_table)
 
         self.device_count = QLabel("0 devices found")
         self.device_count.setObjectName("subtitle")
         left_layout.addWidget(self.device_count)
 
-        content.addWidget(left_panel, stretch=2)
+        content.addWidget(left_panel, stretch=3)
 
         # Right: Controls
         right_panel = QFrame()
@@ -287,6 +324,7 @@ class AutoCastGUI(QMainWindow):
         self.media_path_label = QLabel("No file selected")
         self.media_path_label.setObjectName("subtitle")
         self.media_path_label.setWordWrap(True)
+        self.media_path_label.setMinimumHeight(40)
         right_layout.addWidget(self.media_path_label)
 
         self.browse_btn = QPushButton("Browse...")
@@ -329,7 +367,7 @@ class AutoCastGUI(QMainWindow):
 
         right_layout.addStretch()
 
-        content.addWidget(right_panel, stretch=1)
+        content.addWidget(right_panel, stretch=2)
         layout.addLayout(content, stretch=1)
 
         # ── Status Bar ──
@@ -344,10 +382,44 @@ class AutoCastGUI(QMainWindow):
         self.stop_btn.clicked.connect(self._on_stop)
         self.volume_slider.valueChanged.connect(self._on_volume_change)
         self.device_table.itemSelectionChanged.connect(self._on_device_select)
+        self.auto_refresh_cb.toggled.connect(self._on_auto_refresh_toggle)
+        self.refresh_interval.valueChanged.connect(self._on_interval_change)
 
         self.bridge.devices_found.connect(self._on_devices_found)
         self.bridge.status_update.connect(self._on_status_update)
         self.bridge.error_occurred.connect(self._on_error)
+
+    def _on_auto_refresh_toggle(self, checked: bool):
+        if checked:
+            self.is_auto_refreshing = True
+            self.scan_btn.setEnabled(False)
+            self.scan_btn.setText("Auto...")
+            interval_ms = self.refresh_interval.value() * 1000
+            self.auto_refresh_timer.start(interval_ms)
+            self.status_label.setText(f"Auto-refresh enabled (every {self.refresh_interval.value()}s)")
+            self._do_auto_scan()
+        else:
+            self.is_auto_refreshing = False
+            self.auto_refresh_timer.stop()
+            self.scan_btn.setEnabled(True)
+            self.scan_btn.setText("Scan")
+            self.status_label.setText("Auto-refresh disabled")
+
+    def _on_interval_change(self, value: int):
+        if self.is_auto_refreshing:
+            self.auto_refresh_timer.setInterval(value * 1000)
+            self.status_label.setText(f"Auto-refresh interval: {value}s")
+
+    def _do_auto_scan(self):
+        def do_scan():
+            try:
+                loop = asyncio.new_event_loop()
+                devices = loop.run_until_complete(scan_all(timeout=4.0))
+                self.bridge.devices_found.emit(devices)
+            except Exception as e:
+                self.bridge.error_occurred.emit(str(e))
+
+        threading.Thread(target=do_scan, daemon=True).start()
 
     def _on_scan(self):
         self.scan_btn.setEnabled(False)
@@ -365,6 +437,9 @@ class AutoCastGUI(QMainWindow):
         threading.Thread(target=do_scan, daemon=True).start()
 
     def _on_devices_found(self, devices: list[Device]):
+        # Preserve selection
+        prev_ip = self.selected_device.ip if self.selected_device else None
+
         self.devices = devices
         self.device_table.setRowCount(len(devices))
 
@@ -375,14 +450,28 @@ class AutoCastGUI(QMainWindow):
         }
 
         for i, d in enumerate(devices):
-            self.device_table.setItem(i, 0, QTableWidgetItem(d.name))
-            self.device_table.setItem(i, 1, QTableWidgetItem(f"{type_icons.get(d.device_type, '')} {d.display_type}"))
-            self.device_table.setItem(i, 2, QTableWidgetItem(f"{d.ip}:{d.port}"))
+            name_item = QTableWidgetItem(d.name)
+            name_item.setToolTip(d.name)
+            self.device_table.setItem(i, 0, name_item)
+
+            type_text = f"{type_icons.get(d.device_type, '')} {d.display_type}"
+            self.device_table.setItem(i, 1, QTableWidgetItem(type_text))
+
+            ip_text = f"{d.ip}:{d.port}"
+            self.device_table.setItem(i, 2, QTableWidgetItem(ip_text))
+
             self.device_table.setItem(i, 3, QTableWidgetItem("Available"))
 
+            # Restore selection
+            if prev_ip and d.ip == prev_ip:
+                self.device_table.selectRow(i)
+
         self.device_count.setText(f"{len(devices)} device(s) found")
-        self.scan_btn.setEnabled(True)
-        self.scan_btn.setText("Scan")
+
+        if not self.is_auto_refreshing:
+            self.scan_btn.setEnabled(True)
+            self.scan_btn.setText("Scan")
+
         self.status_label.setText(f"Found {len(devices)} device(s)")
 
     def _on_browse(self):
@@ -395,6 +484,7 @@ class AutoCastGUI(QMainWindow):
             self.media_path = filepath
             name = Path(filepath).name
             self.media_path_label.setText(name)
+            self.media_path_label.setToolTip(filepath)
             self.status_label.setText(f"Selected: {name}")
 
     def _on_device_select(self):
