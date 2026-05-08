@@ -221,6 +221,7 @@ class AutoCastGUI(QMainWindow):
         self.auto_refresh_timer = QTimer()
         self.auto_refresh_timer.timeout.connect(self._do_auto_scan)
         self.is_auto_refreshing = False
+        self.scan_count = 0
 
         self._init_ui()
         self._connect_signals()
@@ -392,11 +393,12 @@ class AutoCastGUI(QMainWindow):
     def _on_auto_refresh_toggle(self, checked: bool):
         if checked:
             self.is_auto_refreshing = True
+            self.scan_count = 0
             self.scan_btn.setEnabled(False)
             self.scan_btn.setText("Auto...")
             interval_ms = self.refresh_interval.value() * 1000
             self.auto_refresh_timer.start(interval_ms)
-            self.status_label.setText(f"Auto-refresh enabled (every {self.refresh_interval.value()}s)")
+            self.status_label.setText(f"Auto-refresh: scanning...")
             self._do_auto_scan()
         else:
             self.is_auto_refreshing = False
@@ -408,9 +410,10 @@ class AutoCastGUI(QMainWindow):
     def _on_interval_change(self, value: int):
         if self.is_auto_refreshing:
             self.auto_refresh_timer.setInterval(value * 1000)
-            self.status_label.setText(f"Auto-refresh interval: {value}s")
 
     def _do_auto_scan(self):
+        self.status_label.setText("Scanning...")
+
         def do_scan():
             try:
                 loop = asyncio.new_event_loop()
@@ -471,8 +474,11 @@ class AutoCastGUI(QMainWindow):
         if not self.is_auto_refreshing:
             self.scan_btn.setEnabled(True)
             self.scan_btn.setText("Scan")
-
-        self.status_label.setText(f"Found {len(devices)} device(s)")
+            self.status_label.setText(f"Found {len(devices)} device(s)")
+        else:
+            self.scan_count += 1
+            next_sec = self.refresh_interval.value()
+            self.status_label.setText(f"Auto-refresh #{self.scan_count}: {len(devices)} device(s) found — next scan in {next_sec}s")
 
     def _on_browse(self):
         ext_list = " ".join(f"*{ext}" for ext in sorted(SUPPORTED_EXTENSIONS))
