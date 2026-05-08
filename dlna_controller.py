@@ -6,12 +6,64 @@ from urllib.parse import urljoin
 
 import aiohttp
 
-from device import Device
+from device import Device, DeviceType
 
 logger = logging.getLogger(__name__)
 
 AVTRANSPORT_NS = "urn:schemas-upnp-org:service:AVTransport:1"
 RENDERINGCONTROL_NS = "urn:schemas-upnp-org:service:RenderingControl:1"
+
+DLNA_PORTS = [49152, 80, 7000, 8008, 8009, 9090, 60929]
+
+
+async def discover_dlna(ip: str) -> Device | None:
+    """Probe common ports for a DLNA MediaRenderer on the given IP."""
+    async with aiohttp.ClientSession() as session:
+        for port in DLNA_PORTS:
+            for path in ["/description.xml", "/rootdesc.xml", "/"]:
+                url = f"http://{ip}:{port}{path}"
+                try:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                        if resp.status != 200:
+                            continue
+                        text = await resp.text()
+                        if "MediaRenderer" not in text:
+                            continue
+                        root = ET.fromstring(text)
+                        ns = {"upnp": "urn:schemas-upnp-org:device-1-0"}
+                        name_el = root.find(".//upnp:friendlyName", ns) or root.find(".//friendlyName")
+                        name = name_el.text.strip() if name_el is not None and name_el.text else ip
+                        ctrl = _find_control_url_xml(root, ns)
+                        if not ctrl:
+                            continue
+                        return Device(
+                            name=name,
+                            device_type=DeviceType.DLNA,
+                            ip=ip,
+                            port=port,
+                            control_url=ctrl,
+                        )
+                except Exception:
+                    continue
+    return None
+
+
+def _find_control_url_xml(root, ns) -> str | None:
+    """Find AVTransport control URL from parsed XML root."""
+    for svc in root.iter():
+        tag = svc.tag.split("}")[-1] if "}" in svc.tag else svc.tag
+        if tag == "service":
+            svc_type = ""
+            ctrl_url = ""
+            for child in svc:
+                ctag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+                if ctag == "serviceType":
+                    svc_type = child.text or ""
+                elif ctag == "controlURL":
+                    ctrl_url = child.text or ""
+            if "AVTransport" in svc_type and ctrl_url:
+                return ctrl_url
+    return None
 
 
 async def play(device: Device, media_url: str, content_type: str = "video/mp4"):
@@ -87,7 +139,8 @@ def _get_control_url(device: Device) -> str:
     if device.control_url:
         if device.control_url.startswith("http"):
             return device.control_url
-        return f"http://{device.ip}:{device.port}{device.control_url}"
+        path = device.control_url if device.control_url.startswith("/") else f"/{device.control_url}"
+        return f"http://{device.ip}:{device.port}{path}"
     return f"http://{device.ip}:{device.port}/AVTransport/control"
 
 
@@ -97,24 +150,15 @@ def _get_rendering_control_url(device: Device) -> str:
         path = device.control_url.replace("AVTransport", "RenderingControl")
         if path.startswith("http"):
             return path
+        if not path.startswith("/"):
+            path = f"/{path}"
         return f"{base}{path}"
     return f"{base}/RenderingControl/control"
 
 
 def _build_didl_lite(media_url: str, content_type: str) -> str:
     """Build DIDL-Lite metadata for SetAVTransportURI."""
-    return (
-        '<?xml version="1.0"?>'
-        '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
-        'xmlns:dc="http://purl.org/dc/elements/1.1/" '
-        'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
-        '<item id="0" parentID="-1" restricted="1">'
-        f'<dc:title>AutoCast</dc:title>'
-        f'<res protocolInfo="http-get:*:{content_type}:DLNA.ORG_OP=01">{media_url}</res>'
-        '<upnp:class>object.item.videoItem</upnp:class>'
-        '</item>'
-        '</DIDL-Lite>'
-    )
+    return ""
 
 
 async def _soap_action(

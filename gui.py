@@ -10,9 +10,11 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QFileDialog, QTableWidget, QTableWidgetItem,
     QHeaderView, QSlider, QFrame, QMessageBox,
     QCheckBox, QSpinBox, QComboBox, QTabWidget, QListWidget, QListWidgetItem,
+    QGraphicsOpacityEffect,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, QSequentialAnimationGroup
-from PySide6.QtGui import QColor, QGraphicsDropShadowEffect, QFont
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, QSequentialAnimationGroup, QPoint
+from PySide6.QtGui import QColor, QFont, QShortcut, QKeySequence
+from PySide6.QtWidgets import QGraphicsDropShadowEffect
 
 from device import Device, DeviceType
 from scanner import scan_all
@@ -34,12 +36,12 @@ class SignalBridge(QObject):
 # ── Animation Helpers ──────────────────────────────────────────────────────
 
 class FadeLabel(QLabel):
-    """Label with fade-in animation when text changes."""
+    """Label with fade-in + slide-up animation when text changes."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._fade = QPropertyAnimation(self, b"windowOpacity")
-        self._fade.setDuration(300)
+        self._fade.setDuration(250)
         self._fade.setStartValue(0.0)
         self._fade.setEndValue(1.0)
         self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -53,6 +55,38 @@ class FadeLabel(QLabel):
         self._fade.start()
 
 
+class AnimatedTabWidget(QTabWidget):
+    """Tab widget with fade transition between tabs."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._transitioning = False
+        self._tab_anim = None
+        self.currentChanged.connect(self._on_tab_change)
+
+    def _on_tab_change(self, index: int):
+        if self._transitioning:
+            return
+        widget = self.widget(index)
+        if widget is None:
+            return
+        self._transitioning = True
+        effect = QGraphicsOpacityEffect(widget)
+        widget.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity")
+        anim.setDuration(200)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.finished.connect(lambda: self._cleanup(widget, effect))
+        anim.start()
+        self._tab_anim = anim
+
+    def _cleanup(self, widget: QWidget, effect: QGraphicsOpacityEffect):
+        widget.setGraphicsEffect(None)
+        self._transitioning = False
+
+
 class ScanAnimation(QObject):
     """Pulsing glow animation for the scan button during scanning."""
 
@@ -60,20 +94,20 @@ class ScanAnimation(QObject):
         super().__init__(button)
         self._btn = button
         self._glow = QGraphicsDropShadowEffect(button)
-        self._glow.setColor(QColor("#22d3ee"))
+        self._glow.setColor(QColor("#38bdf8"))
         self._glow.setOffset(0, 0)
         self._glow.setBlurRadius(0)
         button.setGraphicsEffect(self._glow)
 
         self._pulse_up = QPropertyAnimation(self._glow, b"blurRadius")
-        self._pulse_up.setDuration(900)
+        self._pulse_up.setDuration(800)
         self._pulse_up.setStartValue(0)
-        self._pulse_up.setEndValue(20)
+        self._pulse_up.setEndValue(25)
         self._pulse_up.setEasingCurve(QEasingCurve.Type.InOutQuad)
 
         self._pulse_down = QPropertyAnimation(self._glow, b"blurRadius")
-        self._pulse_down.setDuration(900)
-        self._pulse_down.setStartValue(20)
+        self._pulse_down.setDuration(800)
+        self._pulse_down.setStartValue(25)
         self._pulse_down.setEndValue(0)
         self._pulse_down.setEasingCurve(QEasingCurve.Type.InOutQuad)
 
@@ -102,79 +136,75 @@ DARK_STYLE = """
 /* ── Base ─────────────────────────────────────────────────────────── */
 
 QMainWindow {
-    background-color: #0f0f13;
+    background-color: #0a0a0c;
 }
 
 QWidget {
-    background-color: #0f0f13;
-    color: #d1d5db;
+    background-color: #0a0a0c;
+    color: #e2e2e8;
     font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
     font-size: 13px;
 }
 
-/* ── Cards & Frames ──────────────────────────────────────────────── */
+/* ── Cards ────────────────────────────────────────────────────────── */
 
 QFrame#card {
-    background-color: #18181b;
-    border: 1px solid #27272a;
-    border-radius: 12px;
+    background-color: #141418;
+    border: 1px solid #1e1e24;
+    border-top: 1px solid #28282f;
+    border-radius: 14px;
     padding: 20px;
 }
 
-QFrame#cardTitle {
-    background-color: transparent;
-    border: none;
-    padding: 0;
-}
-
 QFrame#statusBar {
-    background-color: #18181b;
-    border: 1px solid #27272a;
-    border-radius: 8px;
+    background-color: #121216;
+    border: 1px solid #1e1e24;
+    border-radius: 10px;
     padding: 8px 16px;
 }
 
 QFrame#separator {
-    background-color: #27272a;
+    background-color: #1e1e24;
     max-height: 1px;
 }
 
 /* ── Typography ──────────────────────────────────────────────────── */
 
 QLabel#title {
-    font-size: 22px;
+    font-size: 24px;
     font-weight: 700;
-    color: #f4f4f5;
-    letter-spacing: -0.3px;
+    color: #f0f0f4;
+    letter-spacing: -0.5px;
 }
 
 QLabel#subtitle {
-    color: #71717a;
-    font-size: 12px;
+    color: #6b6b78;
+    font-size: 11px;
 }
 
 QLabel#status {
-    color: #22d3ee;
-    font-weight: 600;
+    color: #38bdf8;
+    font-weight: 500;
     font-size: 12px;
     padding: 8px 0 0 0;
 }
 
 QLabel#sectionTitle {
-    font-size: 14px;
+    font-size: 11px;
     font-weight: 600;
-    color: #e4e4e7;
-    letter-spacing: -0.2px;
+    color: #6b6b78;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
 }
 
 QLabel#accentLabel {
-    color: #22d3ee;
+    color: #38bdf8;
     font-size: 12px;
     font-weight: 500;
 }
 
 QLabel#emptyState {
-    color: #52525b;
+    color: #4a4a55;
     font-size: 13px;
     font-style: italic;
 }
@@ -182,9 +212,9 @@ QLabel#emptyState {
 /* ── Buttons ─────────────────────────────────────────────────────── */
 
 QPushButton {
-    background-color: #27272a;
-    color: #d1d5db;
-    border: 1px solid #3f3f46;
+    background-color: #1e1e24;
+    color: #e2e2e8;
+    border: 1px solid #28282f;
     border-radius: 8px;
     padding: 9px 18px;
     font-weight: 500;
@@ -193,39 +223,39 @@ QPushButton {
 }
 
 QPushButton:hover {
-    background-color: #3f3f46;
-    border-color: #52525b;
-    color: #f4f4f5;
+    background-color: #28282f;
+    border-color: #3a3a44;
+    color: #f0f0f4;
 }
 
 QPushButton:pressed {
-    background-color: #52525b;
+    background-color: #3a3a44;
 }
 
 QPushButton:disabled {
-    background-color: #1c1c1f;
-    color: #52525b;
-    border-color: #27272a;
+    background-color: #161618;
+    color: #3a3a44;
+    border-color: #1e1e24;
 }
 
 QPushButton#primaryBtn {
-    background-color: #06b6d4;
-    color: #0f0f13;
+    background-color: #2563eb;
+    color: #ffffff;
     border: none;
     font-weight: 600;
 }
 
 QPushButton#primaryBtn:hover {
-    background-color: #22d3ee;
+    background-color: #3b82f6;
 }
 
 QPushButton#primaryBtn:pressed {
-    background-color: #0891b2;
+    background-color: #1d4ed8;
 }
 
 QPushButton#primaryBtn:disabled {
-    background-color: #164e63;
-    color: #155e75;
+    background-color: #1e3a5f;
+    color: #2d4a7a;
 }
 
 QPushButton#dangerBtn {
@@ -244,49 +274,50 @@ QPushButton#dangerBtn:pressed {
 }
 
 QPushButton#scanningBtn {
-    background-color: #164e63;
-    color: #22d3ee;
-    border: 1px solid #155e75;
+    background-color: #172554;
+    color: #38bdf8;
+    border: 1px solid #1e3a5f;
     font-weight: 600;
 }
 
 QPushButton#secondaryBtn {
     background-color: transparent;
-    border: 1px solid #3f3f46;
-    color: #a1a1aa;
+    border: 1px solid #28282f;
+    color: #8a8a96;
 }
 
 QPushButton#secondaryBtn:hover {
-    background-color: #27272a;
-    border-color: #52525b;
-    color: #d1d5db;
+    background-color: #1e1e24;
+    border-color: #3a3a44;
+    color: #b0b0bc;
 }
 
 /* ── Table ───────────────────────────────────────────────────────── */
 
 QTableWidget {
-    background-color: #18181b;
-    border: 1px solid #27272a;
-    border-radius: 8px;
-    gridline-color: #27272a;
+    background-color: #141418;
+    border: 1px solid #1e1e24;
+    border-radius: 10px;
+    gridline-color: transparent;
     selection-background-color: transparent;
     outline: none;
 }
 
 QTableWidget::item {
-    padding: 10px 8px;
-    border-bottom: 1px solid #1e1e22;
-    color: #d1d5db;
+    padding: 12px 10px;
+    border-bottom: 1px solid #1a1a20;
+    color: #e2e2e8;
 }
 
 QTableWidget::item:selected {
     background-color: #172554;
     color: #e4e4e7;
-    border-left: 2px solid #22d3ee;
+    border-left: 2px solid #38bdf8;
+    border-bottom: 1px solid #172554;
 }
 
 QTableWidget::item:hover {
-    background-color: #1e1e22;
+    background-color: #1a1a20;
 }
 
 QTableWidget::item:selected:hover {
@@ -294,53 +325,53 @@ QTableWidget::item:selected:hover {
 }
 
 QHeaderView::section {
-    background-color: #18181b;
-    color: #71717a;
-    padding: 10px 8px;
+    background-color: #141418;
+    color: #6b6b78;
+    padding: 12px 10px;
     border: none;
-    border-bottom: 1px solid #27272a;
+    border-bottom: 1px solid #1e1e24;
     font-weight: 600;
-    font-size: 11px;
+    font-size: 10px;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.8px;
 }
 
 /* ── List ────────────────────────────────────────────────────────── */
 
 QListWidget {
-    background-color: #18181b;
-    border: 1px solid #27272a;
-    border-radius: 8px;
+    background-color: #141418;
+    border: 1px solid #1e1e24;
+    border-radius: 10px;
     padding: 4px;
     outline: none;
 }
 
 QListWidget::item {
     padding: 10px 12px;
-    border-bottom: 1px solid #1e1e22;
+    border-bottom: 1px solid #1a1a20;
     border-radius: 6px;
-    color: #d1d5db;
+    color: #e2e2e8;
 }
 
 QListWidget::item:selected {
-    background-color: #1e3a5f;
+    background-color: #172554;
     color: #e4e4e7;
 }
 
 QListWidget::item:hover {
-    background-color: #27272a;
+    background-color: #1e1e24;
 }
 
 /* ── Slider ──────────────────────────────────────────────────────── */
 
 QSlider::groove:horizontal {
     height: 4px;
-    background: #27272a;
+    background: #1e1e24;
     border-radius: 2px;
 }
 
 QSlider::handle:horizontal {
-    background: #e4e4e7;
+    background: #e2e2e8;
     width: 16px;
     height: 16px;
     margin: -6px 0;
@@ -348,25 +379,25 @@ QSlider::handle:horizontal {
 }
 
 QSlider::handle:horizontal:hover {
-    background: #22d3ee;
+    background: #38bdf8;
 }
 
 QSlider::sub-page:horizontal {
-    background: #06b6d4;
+    background: #2563eb;
     border-radius: 2px;
 }
 
 /* ── Checkbox ────────────────────────────────────────────────────── */
 
 QCheckBox {
-    color: #d1d5db;
+    color: #e2e2e8;
     spacing: 8px;
 }
 
 QCheckBox::indicator {
     width: 16px;
     height: 16px;
-    border: 2px solid #3f3f46;
+    border: 2px solid #3a3a44;
     border-radius: 4px;
     background-color: transparent;
 }
@@ -376,26 +407,26 @@ QCheckBox::indicator:hover {
 }
 
 QCheckBox::indicator:checked {
-    background-color: #06b6d4;
-    border-color: #06b6d4;
+    background-color: #2563eb;
+    border-color: #2563eb;
 }
 
 /* ── SpinBox ─────────────────────────────────────────────────────── */
 
 QSpinBox {
-    background-color: #27272a;
-    border: 1px solid #3f3f46;
+    background-color: #1e1e24;
+    border: 1px solid #28282f;
     border-radius: 6px;
     padding: 5px 8px;
-    color: #d1d5db;
+    color: #e2e2e8;
 }
 
 QSpinBox:focus {
-    border-color: #06b6d4;
+    border-color: #38bdf8;
 }
 
 QSpinBox::up-button, QSpinBox::down-button {
-    background-color: #3f3f46;
+    background-color: #28282f;
     border: none;
     width: 18px;
 }
@@ -403,20 +434,20 @@ QSpinBox::up-button, QSpinBox::down-button {
 /* ── ComboBox ────────────────────────────────────────────────────── */
 
 QComboBox {
-    background-color: #27272a;
-    border: 1px solid #3f3f46;
-    border-radius: 6px;
+    background-color: #1e1e24;
+    border: 1px solid #28282f;
+    border-radius: 8px;
     padding: 7px 12px;
-    color: #d1d5db;
+    color: #e2e2e8;
     min-height: 18px;
 }
 
 QComboBox:hover {
-    border-color: #52525b;
+    border-color: #3a3a44;
 }
 
 QComboBox:focus {
-    border-color: #06b6d4;
+    border-color: #38bdf8;
 }
 
 QComboBox::drop-down {
@@ -428,66 +459,67 @@ QComboBox::down-arrow {
     image: none;
     border-left: 4px solid transparent;
     border-right: 4px solid transparent;
-    border-top: 5px solid #71717a;
+    border-top: 5px solid #6b6b78;
     margin-right: 8px;
 }
 
 QComboBox QAbstractItemView {
-    background-color: #27272a;
-    border: 1px solid #3f3f46;
-    color: #d1d5db;
-    selection-background-color: #1e3a5f;
+    background-color: #1a1a20;
+    border: 1px solid #28282f;
+    color: #e2e2e8;
+    selection-background-color: #172554;
     selection-color: #e4e4e7;
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 4px;
 }
 
 /* ── Tabs ────────────────────────────────────────────────────────── */
 
 QTabWidget::pane {
-    border: 1px solid #27272a;
-    border-radius: 8px;
-    background-color: #18181b;
+    border: 1px solid #1e1e24;
+    border-radius: 10px;
+    background-color: #141418;
     top: -1px;
 }
 
 QTabBar::tab {
     background-color: transparent;
-    color: #71717a;
+    color: #6b6b78;
     border: none;
     border-bottom: 2px solid transparent;
     padding: 10px 20px;
     margin-right: 4px;
     font-weight: 500;
+    font-size: 13px;
 }
 
 QTabBar::tab:selected {
-    color: #22d3ee;
+    color: #38bdf8;
     font-weight: 600;
-    border-bottom: 2px solid #22d3ee;
+    border-bottom: 2px solid #38bdf8;
 }
 
 QTabBar::tab:hover:!selected {
-    color: #d1d5db;
-    border-bottom: 2px solid #3f3f46;
+    color: #b0b0bc;
+    border-bottom: 2px solid #28282f;
 }
 
 /* ── Scrollbar ───────────────────────────────────────────────────── */
 
 QScrollBar:vertical {
     background: transparent;
-    width: 8px;
+    width: 6px;
     margin: 0;
 }
 
 QScrollBar::handle:vertical {
-    background: #3f3f46;
-    border-radius: 4px;
+    background: #28282f;
+    border-radius: 3px;
     min-height: 30px;
 }
 
 QScrollBar::handle:vertical:hover {
-    background: #52525b;
+    background: #3a3a44;
 }
 
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
@@ -500,18 +532,18 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
 
 QScrollBar:horizontal {
     background: transparent;
-    height: 8px;
+    height: 6px;
     margin: 0;
 }
 
 QScrollBar::handle:horizontal {
-    background: #3f3f46;
-    border-radius: 4px;
+    background: #28282f;
+    border-radius: 3px;
     min-width: 30px;
 }
 
 QScrollBar::handle:horizontal:hover {
-    background: #52525b;
+    background: #3a3a44;
 }
 
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
@@ -539,8 +571,8 @@ class AutoCastGUI(QMainWindow):
         # Screen capture
         self.streamer = ScreenStreamer(fps=10, quality=70)
         self.is_streaming = False
-        self.windows_list = []
-        self.monitors_list = []
+        self.windows_list: list = []
+        self.monitors_list: list = []
 
         # Auto-refresh timer
         self.auto_refresh_timer = QTimer()
@@ -551,6 +583,8 @@ class AutoCastGUI(QMainWindow):
         self._init_ui()
         self._connect_signals()
         self._refresh_windows()
+
+    # ── UI Construction ─────────────────────────────────────────────────────
 
     def _init_ui(self):
         self.setWindowTitle("Auto-Cast")
@@ -563,216 +597,109 @@ class AutoCastGUI(QMainWindow):
         main_layout.setSpacing(16)
         main_layout.setContentsMargins(24, 24, 24, 20)
 
-        # ── Header ──
+        self._build_header(main_layout)
+        self._build_content(main_layout)
+        self._build_status_bar(main_layout)
+
+    def _build_header(self, parent: QVBoxLayout):
         header = QHBoxLayout()
         header.setSpacing(12)
 
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
         title = QLabel("Auto-Cast")
         title.setObjectName("title")
-        subtitle = QLabel("DLNA / AirPlay / Chromecast")
+        subtitle = QLabel("DLNA  /  AirPlay  /  Chromecast")
         subtitle.setObjectName("subtitle")
-        header.addWidget(title)
-        header.addWidget(subtitle)
+        title_col.addWidget(title)
+        title_col.addWidget(subtitle)
+        header.addLayout(title_col)
         header.addStretch()
 
-        version_badge = QLabel("v1.0")
-        version_badge.setObjectName("accentLabel")
-        version_badge.setStyleSheet("background-color: #164e63; border-radius: 4px; padding: 2px 8px; font-size: 11px;")
-        header.addWidget(version_badge)
-        main_layout.addLayout(header)
+        parent.addLayout(header)
 
-        # ── Main Content ──
+    def _build_content(self, parent: QVBoxLayout):
         content = QHBoxLayout()
         content.setSpacing(16)
+        content.addWidget(self._build_device_panel(), stretch=2)
+        content.addWidget(self._build_control_panel(), stretch=3)
+        parent.addLayout(content, stretch=1)
 
-        # ── Left Panel: Devices ──
-        left_panel = QFrame()
-        left_panel.setObjectName("card")
-        left_shadow = QGraphicsDropShadowEffect()
-        left_shadow.setBlurRadius(24)
-        left_shadow.setColor(QColor(0, 0, 0, 60))
-        left_shadow.setOffset(0, 4)
-        left_panel.setGraphicsEffect(left_shadow)
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setSpacing(12)
+    def _build_device_panel(self) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("card")
+        layout = QVBoxLayout(panel)
+        layout.setSpacing(12)
 
-        device_header = QHBoxLayout()
-        device_header.setSpacing(8)
-        device_label = QLabel("Devices")
-        device_label.setObjectName("sectionTitle")
+        # Row 1: Title + Scan
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)
+        label = QLabel("DEVICES")
+        label.setObjectName("sectionTitle")
+        self.scan_btn = QPushButton("  Scan")
+        self.scan_btn.setMinimumWidth(90)
+        row1.addWidget(label)
+        row1.addStretch()
+        row1.addWidget(self.scan_btn)
+        layout.addLayout(row1)
 
-        self.auto_refresh_cb = QCheckBox("Auto")
+        # Row 2: Auto-refresh controls
+        row2 = QHBoxLayout()
+        row2.setSpacing(8)
+        self.auto_refresh_cb = QCheckBox("Auto-refresh")
         self.refresh_interval = QSpinBox()
         self.refresh_interval.setRange(3, 60)
         self.refresh_interval.setValue(10)
         self.refresh_interval.setSuffix("s")
         self.refresh_interval.setFixedWidth(70)
+        row2.addWidget(self.auto_refresh_cb)
+        row2.addWidget(self.refresh_interval)
+        row2.addStretch()
+        layout.addLayout(row2)
 
-        self.scan_btn = QPushButton("  Scan")
-        self.scan_btn.setMinimumWidth(90)
-
-        device_header.addWidget(device_label)
-        device_header.addStretch()
-        device_header.addWidget(self.auto_refresh_cb)
-        device_header.addWidget(self.refresh_interval)
-        device_header.addWidget(self.scan_btn)
-        left_layout.addLayout(device_header)
-
+        # Device table
         self.device_table = QTableWidget()
         self.device_table.setColumnCount(4)
-        self.device_table.setHorizontalHeaderLabels(["Name", "Type", "IP Address", "Status"])
+        self.device_table.setHorizontalHeaderLabels(["Name", "Type", "IP", "Status"])
         self.device_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.device_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self.device_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         self.device_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self.device_table.setColumnWidth(1, 110)
-        self.device_table.setColumnWidth(2, 170)
-        self.device_table.setColumnWidth(3, 90)
+        self.device_table.setColumnWidth(1, 100)
+        self.device_table.setColumnWidth(2, 160)
+        self.device_table.setColumnWidth(3, 80)
         self.device_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.device_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.device_table.verticalHeader().setVisible(False)
         self.device_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.device_table.setMinimumHeight(200)
         self.device_table.setShowGrid(False)
-        left_layout.addWidget(self.device_table)
+        layout.addWidget(self.device_table)
 
-        self.device_count = QLabel("0 devices found")
+        self.device_count = QLabel("No devices")
         self.device_count.setObjectName("subtitle")
-        left_layout.addWidget(self.device_count)
+        layout.addWidget(self.device_count)
 
-        content.addWidget(left_panel, stretch=3)
+        return panel
 
-        # ── Right Panel: Controls with Tabs ──
-        right_panel = QFrame()
-        right_panel.setObjectName("card")
-        right_shadow = QGraphicsDropShadowEffect()
-        right_shadow.setBlurRadius(24)
-        right_shadow.setColor(QColor(0, 0, 0, 60))
-        right_shadow.setOffset(0, 4)
-        right_panel.setGraphicsEffect(right_shadow)
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setSpacing(12)
+    def _build_control_panel(self) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("card")
+        layout = QVBoxLayout(panel)
+        layout.setSpacing(12)
 
-        self.tabs = QTabWidget()
-        right_layout.addWidget(self.tabs)
+        self.tabs = AnimatedTabWidget()
+        self.tabs.addTab(self._build_media_tab(), "Media File")
+        self.tabs.addTab(self._build_window_tab(), "Window Cast")
+        self.tabs.addTab(self._build_screen_tab(), "Screen Cast")
+        layout.addWidget(self.tabs)
 
-        # Tab 1: Media File
-        file_tab = QWidget()
-        file_layout = QVBoxLayout(file_tab)
-        file_layout.setSpacing(12)
-        file_layout.setContentsMargins(16, 16, 16, 16)
+        layout.addWidget(self._make_separator())
 
-        media_label = QLabel("Media File")
-        media_label.setObjectName("sectionTitle")
-        file_layout.addWidget(media_label)
-
-        self.media_path_label = QLabel("No file selected")
-        self.media_path_label.setObjectName("emptyState")
-        self.media_path_label.setWordWrap(True)
-        self.media_path_label.setMinimumHeight(36)
-        file_layout.addWidget(self.media_path_label)
-
-        self.browse_btn = QPushButton("  Browse...")
-        file_layout.addWidget(self.browse_btn)
-
-        file_layout.addStretch()
-        self.tabs.addTab(file_tab, "Media File")
-
-        # Tab 2: Window Cast
-        window_tab = QWidget()
-        window_layout = QVBoxLayout(window_tab)
-        window_layout.setSpacing(12)
-        window_layout.setContentsMargins(16, 16, 16, 16)
-
-        win_header = QHBoxLayout()
-        win_label = QLabel("Select Window")
-        win_label.setObjectName("sectionTitle")
-        self.refresh_windows_btn = QPushButton("Refresh")
-        self.refresh_windows_btn.setMinimumWidth(75)
-        self.refresh_windows_btn.setObjectName("secondaryBtn")
-        win_header.addWidget(win_label)
-        win_header.addStretch()
-        win_header.addWidget(self.refresh_windows_btn)
-        window_layout.addLayout(win_header)
-
-        self.window_list = QListWidget()
-        self.window_list.setMinimumHeight(200)
-        window_layout.addWidget(self.window_list)
-
-        self.window_info_label = QLabel("Select a window to cast")
-        self.window_info_label.setObjectName("subtitle")
-        window_layout.addWidget(self.window_info_label)
-
-        self.cast_window_btn = QPushButton("Cast Window")
-        self.cast_window_btn.setObjectName("primaryBtn")
-        window_layout.addWidget(self.cast_window_btn)
-
-        window_layout.addStretch()
-        self.tabs.addTab(window_tab, "Window Cast")
-
-        # Tab 3: Screen Cast
-        screen_tab = QWidget()
-        screen_layout = QVBoxLayout(screen_tab)
-        screen_layout.setSpacing(12)
-        screen_layout.setContentsMargins(16, 16, 16, 16)
-
-        monitor_label = QLabel("Select Monitor")
-        monitor_label.setObjectName("sectionTitle")
-        screen_layout.addWidget(monitor_label)
-
-        self.monitor_combo = QComboBox()
-        self.monitor_combo.setFixedHeight(38)
-        screen_layout.addWidget(self.monitor_combo)
-
-        self.refresh_monitors_btn = QPushButton("Refresh Monitors")
-        self.refresh_monitors_btn.setObjectName("secondaryBtn")
-        screen_layout.addWidget(self.refresh_monitors_btn)
-
-        screen_layout.addSpacing(8)
-
-        fps_label = QLabel("Frame Rate")
-        fps_label.setObjectName("sectionTitle")
-        screen_layout.addWidget(fps_label)
-
-        fps_row = QHBoxLayout()
-        fps_row.setSpacing(12)
-
-        fps_min = QLabel("1")
-        fps_min.setObjectName("subtitle")
-        fps_min.setFixedWidth(12)
-        fps_min.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        fps_row.addWidget(fps_min)
-
-        self.fps_slider = QSlider(Qt.Orientation.Horizontal)
-        self.fps_slider.setRange(1, 30)
-        self.fps_slider.setValue(10)
-        fps_row.addWidget(self.fps_slider)
-
-        fps_max = QLabel("30")
-        fps_max.setObjectName("subtitle")
-        fps_max.setFixedWidth(20)
-        fps_max.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        fps_row.addWidget(fps_max)
-
-        self.fps_value = QLabel("10 FPS")
-        self.fps_value.setObjectName("accentLabel")
-        self.fps_value.setFixedWidth(55)
-        fps_row.addWidget(self.fps_value)
-        screen_layout.addLayout(fps_row)
-
-        self.cast_screen_btn = QPushButton("Cast Screen")
-        self.cast_screen_btn.setObjectName("primaryBtn")
-        screen_layout.addWidget(self.cast_screen_btn)
-
-        screen_layout.addStretch()
-        self.tabs.addTab(screen_tab, "Screen Cast")
-
-        # ── Common Controls ──
-        right_layout.addWidget(self._make_separator())
-
-        play_label = QLabel("Playback")
+        # Playback
+        play_label = QLabel("PLAYBACK")
         play_label.setObjectName("sectionTitle")
-        right_layout.addWidget(play_label)
+        layout.addWidget(play_label)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
@@ -782,91 +709,230 @@ class AutoCastGUI(QMainWindow):
         self.stop_btn.setObjectName("dangerBtn")
         btn_row.addWidget(self.play_btn)
         btn_row.addWidget(self.stop_btn)
-        right_layout.addLayout(btn_row)
+        layout.addLayout(btn_row)
 
-        vol_label = QLabel("Volume")
+        # Volume
+        vol_label = QLabel("VOLUME")
         vol_label.setObjectName("sectionTitle")
-        right_layout.addWidget(vol_label)
+        layout.addWidget(vol_label)
 
         vol_row = QHBoxLayout()
         vol_row.setSpacing(12)
-
         vol_min = QLabel("0")
         vol_min.setObjectName("subtitle")
         vol_min.setFixedWidth(16)
         vol_min.setAlignment(Qt.AlignmentFlag.AlignCenter)
         vol_row.addWidget(vol_min)
-
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(70)
         vol_row.addWidget(self.volume_slider)
-
         vol_max = QLabel("100")
         vol_max.setObjectName("subtitle")
         vol_max.setFixedWidth(28)
         vol_max.setAlignment(Qt.AlignmentFlag.AlignCenter)
         vol_row.addWidget(vol_max)
-
         self.volume_value = QLabel("70%")
         self.volume_value.setObjectName("accentLabel")
         self.volume_value.setFixedWidth(40)
         vol_row.addWidget(self.volume_value)
-        right_layout.addLayout(vol_row)
+        layout.addLayout(vol_row)
 
-        content.addWidget(right_panel, stretch=2)
-        main_layout.addLayout(content, stretch=1)
+        return panel
 
-        # ── Status Bar ──
-        status_frame = QFrame()
-        status_frame.setObjectName("statusBar")
-        status_shadow = QGraphicsDropShadowEffect()
-        status_shadow.setBlurRadius(16)
-        status_shadow.setColor(QColor(0, 0, 0, 40))
-        status_shadow.setOffset(0, 2)
-        status_frame.setGraphicsEffect(status_shadow)
-        status_layout = QHBoxLayout(status_frame)
-        status_layout.setContentsMargins(12, 6, 12, 6)
+    def _build_media_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
 
-        status_dot = QLabel("●")
-        status_dot.setStyleSheet("color: #22d3ee; font-size: 8px;")
-        status_layout.addWidget(status_dot)
+        self.media_path_label = QLabel("No file selected")
+        self.media_path_label.setObjectName("emptyState")
+        self.media_path_label.setWordWrap(True)
+        self.media_path_label.setMinimumHeight(36)
+        layout.addWidget(self.media_path_label)
+
+        self.browse_btn = QPushButton("  Browse...")
+        layout.addWidget(self.browse_btn)
+        layout.addStretch()
+        return tab
+
+    def _build_window_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        header = QHBoxLayout()
+        header.addStretch()
+        self.refresh_windows_btn = QPushButton("Refresh")
+        self.refresh_windows_btn.setMinimumWidth(75)
+        self.refresh_windows_btn.setObjectName("secondaryBtn")
+        header.addWidget(self.refresh_windows_btn)
+        layout.addLayout(header)
+
+        self.window_list = QListWidget()
+        self.window_list.setMinimumHeight(200)
+        layout.addWidget(self.window_list)
+
+        self.window_info_label = QLabel("Select a window to cast")
+        self.window_info_label.setObjectName("subtitle")
+        layout.addWidget(self.window_info_label)
+
+        self.cast_window_btn = QPushButton("Cast Window")
+        self.cast_window_btn.setObjectName("primaryBtn")
+        layout.addWidget(self.cast_window_btn)
+        layout.addStretch()
+        return tab
+
+    def _build_screen_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        # Monitor selector
+        monitor_label = QLabel("MONITOR")
+        monitor_label.setObjectName("sectionTitle")
+        layout.addWidget(monitor_label)
+
+        self.monitor_combo = QComboBox()
+        self.monitor_combo.setFixedHeight(38)
+        layout.addWidget(self.monitor_combo)
+
+        self.refresh_monitors_btn = QPushButton("Refresh Monitors")
+        self.refresh_monitors_btn.setObjectName("secondaryBtn")
+        layout.addWidget(self.refresh_monitors_btn)
+
+        layout.addSpacing(4)
+
+        # FPS slider
+        s1, r1, self.fps_slider, self.fps_value = self._make_slider_row(
+            "FRAME RATE", "1", "30", 1, 30, 10, " FPS"
+        )
+        layout.addWidget(s1)
+        layout.addLayout(r1)
+
+        # Bitrate slider
+        s2, r2, self.bitrate_slider, self.bitrate_value = self._make_slider_row(
+            "BITRATE LIMIT", "Off", "5M", 0, 25, 5, " KB/s", unlimited_label="Unlimited"
+        )
+        layout.addWidget(s2)
+        layout.addLayout(r2)
+
+        self.cast_screen_btn = QPushButton("Cast Screen")
+        self.cast_screen_btn.setObjectName("primaryBtn")
+        layout.addWidget(self.cast_screen_btn)
+        layout.addStretch()
+        return tab
+
+    def _build_status_bar(self, parent: QVBoxLayout):
+        frame = QFrame()
+        frame.setObjectName("statusBar")
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(12)
+        shadow.setColor(QColor(0, 0, 0, 30))
+        shadow.setOffset(0, 2)
+        frame.setGraphicsEffect(shadow)
+
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(12, 6, 12, 6)
+
+        dot = QLabel("●")
+        dot.setStyleSheet("color: #38bdf8; font-size: 8px;")
+        layout.addWidget(dot)
 
         self.status_label = FadeLabel("Ready")
         self.status_label.setObjectName("status")
-        status_layout.addWidget(self.status_label)
-        status_layout.addStretch()
+        layout.addWidget(self.status_label)
+        layout.addStretch()
 
-        main_layout.addWidget(status_frame)
+        parent.addWidget(frame)
 
-        # ── Scan Animation ──
-        self._scan_anim = ScanAnimation(self.scan_btn)
+    # ── UI Helpers ──────────────────────────────────────────────────────────
 
-    def _make_separator(self) -> QFrame:
+    @staticmethod
+    def _make_separator() -> QFrame:
         sep = QFrame()
         sep.setObjectName("separator")
         sep.setFrameShape(QFrame.Shape.HLine)
         return sep
 
+    @staticmethod
+    def _make_slider_row(
+        title: str, min_text: str, max_text: str,
+        range_min: int, range_max: int, default: int,
+        suffix: str = "", unlimited_label: str = "",
+    ) -> tuple[QLabel, QHBoxLayout, QSlider, QLabel]:
+        label = QLabel(title)
+        label.setObjectName("sectionTitle")
+
+        row = QHBoxLayout()
+        row.setSpacing(12)
+
+        min_lbl = QLabel(min_text)
+        min_lbl.setObjectName("subtitle")
+        min_lbl.setFixedWidth(22)
+        min_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row.addWidget(min_lbl)
+
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(range_min, range_max)
+        slider.setValue(default)
+        row.addWidget(slider)
+
+        max_lbl = QLabel(max_text)
+        max_lbl.setObjectName("subtitle")
+        max_lbl.setFixedWidth(28)
+        max_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row.addWidget(max_lbl)
+
+        if default == 0 and unlimited_label:
+            init_text = unlimited_label
+        elif suffix:
+            init_text = f"{default}{suffix}"
+        else:
+            init_text = str(default)
+        value_lbl = QLabel(init_text)
+        value_lbl.setObjectName("accentLabel")
+        value_lbl.setFixedWidth(70)
+        row.addWidget(value_lbl)
+
+        return label, row, slider, value_lbl
+
     def _animate_button_click(self, btn: QPushButton):
         anim = QPropertyAnimation(btn, b"geometry")
-        anim.setDuration(120)
+        anim.setDuration(100)
         rect = btn.geometry()
         anim.setKeyValueAt(0.0, rect)
-        anim.setKeyValueAt(0.3, rect.adjusted(2, 1, -2, -1))
+        anim.setKeyValueAt(0.3, rect.adjusted(1, 1, -1, -1))
         anim.setKeyValueAt(1.0, rect)
         anim.setEasingCurve(QEasingCurve.Type.OutQuad)
         anim.start()
         btn._click_anim = anim
 
+    def _fade_table_in(self):
+        effect = QGraphicsOpacityEffect(self.device_table)
+        self.device_table.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity")
+        anim.setDuration(300)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.finished.connect(lambda: self.device_table.setGraphicsEffect(None))
+        anim.start()
+        self._table_fade = anim
+
+    # ── Signal Wiring ───────────────────────────────────────────────────────
+
     def _connect_signals(self):
-        # Device scanning
+        # Scanning
         self.scan_btn.clicked.connect(self._on_scan)
         self.auto_refresh_cb.toggled.connect(self._on_auto_refresh_toggle)
         self.refresh_interval.valueChanged.connect(self._on_interval_change)
         self.device_table.itemSelectionChanged.connect(self._on_device_select)
 
-        # Media file
+        # Media
         self.browse_btn.clicked.connect(self._on_browse)
         self.play_btn.clicked.connect(self._on_play)
         self.stop_btn.clicked.connect(self._on_stop)
@@ -881,13 +947,19 @@ class AutoCastGUI(QMainWindow):
         self.refresh_monitors_btn.clicked.connect(self._refresh_monitors)
         self.cast_screen_btn.clicked.connect(self._on_cast_screen)
         self.fps_slider.valueChanged.connect(lambda v: self.fps_value.setText(f"{v} FPS"))
+        self.bitrate_slider.valueChanged.connect(self._on_bitrate_change)
 
-        # Signals
+        # Bridge
         self.bridge.devices_found.connect(self._on_devices_found)
         self.bridge.status_update.connect(self._on_status_update)
         self.bridge.error_occurred.connect(self._on_error)
 
-    # ── Device Scanning ──────────────────────────────────────────────────────
+        # Keyboard shortcuts
+        QShortcut(QKeySequence("Ctrl+O"), self, self._on_browse)
+        QShortcut(QKeySequence("F5"), self, self._on_scan)
+        QShortcut(QKeySequence("Ctrl+Q"), self, self.close)
+
+    # ── Device Scanning ─────────────────────────────────────────────────────
 
     def _on_auto_refresh_toggle(self, checked: bool):
         if checked:
@@ -896,9 +968,8 @@ class AutoCastGUI(QMainWindow):
             self.scan_btn.setEnabled(False)
             self.scan_btn.setText("Auto...")
             self._scan_anim.start()
-            interval_ms = self.refresh_interval.value() * 1000
-            self.auto_refresh_timer.start(interval_ms)
-            self.status_label.setText("Auto-refresh: scanning...")
+            self.auto_refresh_timer.start(self.refresh_interval.value() * 1000)
+            self.status_label.setText("Auto-refresh enabled")
             self._do_auto_scan()
         else:
             self.is_auto_refreshing = False
@@ -944,12 +1015,11 @@ class AutoCastGUI(QMainWindow):
     def _on_devices_found(self, devices: list[Device]):
         prev_ip = self.selected_device.ip if self.selected_device else None
         self.selected_device = None
-
         self.devices = devices
         self.device_table.setRowCount(len(devices))
 
         type_colors = {
-            DeviceType.DLNA: QColor("#22d3ee"),
+            DeviceType.DLNA: QColor("#38bdf8"),
             DeviceType.AIRPLAY: QColor("#a78bfa"),
             DeviceType.CHROMECAST: QColor("#f472b6"),
         }
@@ -960,14 +1030,14 @@ class AutoCastGUI(QMainWindow):
             self.device_table.setItem(i, 0, name_item)
 
             type_item = QTableWidgetItem(d.display_type)
-            type_item.setForeground(type_colors.get(d.device_type, QColor("#d1d5db")))
+            type_item.setForeground(type_colors.get(d.device_type, QColor("#e2e2e8")))
             type_item.setFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
             self.device_table.setItem(i, 1, type_item)
 
             self.device_table.setItem(i, 2, QTableWidgetItem(f"{d.ip}:{d.port}"))
 
             status_item = QTableWidgetItem("● Online")
-            status_item.setForeground(QColor("#4ade80"))
+            status_item.setForeground(QColor("#34d399"))
             self.device_table.setItem(i, 3, status_item)
 
             if prev_ip and d.ip == prev_ip:
@@ -975,6 +1045,7 @@ class AutoCastGUI(QMainWindow):
                 self.selected_device = d
 
         self.device_count.setText(f"{len(devices)} device(s) found")
+        self._fade_table_in()
 
         if not self.is_auto_refreshing:
             self._scan_anim.stop()
@@ -993,7 +1064,7 @@ class AutoCastGUI(QMainWindow):
             if idx < len(self.devices):
                 self.selected_device = self.devices[idx]
 
-    # ── Media File ───────────────────────────────────────────────────────────
+    # ── Media File ──────────────────────────────────────────────────────────
 
     def _on_browse(self):
         self._animate_button_click(self.browse_btn)
@@ -1008,7 +1079,9 @@ class AutoCastGUI(QMainWindow):
             self.media_path_label.setObjectName("subtitle")
             self.media_path_label.style().unpolish(self.media_path_label)
             self.media_path_label.style().polish(self.media_path_label)
-            self.media_path_label.setText(name)
+            metrics = self.media_path_label.fontMetrics()
+            elided = metrics.elidedText(name, Qt.TextElideMode.ElideMiddle, 280)
+            self.media_path_label.setText(elided)
             self.media_path_label.setToolTip(filepath)
             self.status_label.setText(f"Selected: {name}")
 
@@ -1042,7 +1115,7 @@ class AutoCastGUI(QMainWindow):
                 if device.device_type == DeviceType.DLNA:
                     loop = asyncio.new_event_loop()
                     server = MediaServer()
-                    loop.run_until_complete(server.start())
+                    loop.run_until_complete(server.start(target_ip=device.ip))
                     server.register_file(media_path)
                     url = server.get_url(media_path)
                     self.media_server = server
@@ -1050,8 +1123,20 @@ class AutoCastGUI(QMainWindow):
                     self.bridge.status_update.emit(f"Playing on {device.name}")
                 elif device.device_type == DeviceType.AIRPLAY:
                     loop = asyncio.new_event_loop()
-                    loop.run_until_complete(airplay_controller.play(device, media_path))
-                    self.bridge.status_update.emit(f"Playing on {device.name}")
+                    try:
+                        loop.run_until_complete(airplay_controller.play(device, media_path))
+                        self.bridge.status_update.emit(f"Playing on {device.name}")
+                    except Exception:
+                        dlna_device = loop.run_until_complete(dlna_controller.discover_dlna(device.ip))
+                        if not dlna_device:
+                            raise RuntimeError(f"No DLNA service on {device.ip}")
+                        server = MediaServer()
+                        loop.run_until_complete(server.start(target_ip=dlna_device.ip))
+                        server.register_file(media_path)
+                        url = server.get_url(media_path)
+                        self.media_server = server
+                        loop.run_until_complete(dlna_controller.play(dlna_device, url, content_type))
+                        self.bridge.status_update.emit(f"Playing on {device.name} (via DLNA)")
                 else:
                     self.bridge.error_occurred.emit(f"Unsupported: {device.device_type}")
             except Exception as e:
@@ -1061,22 +1146,81 @@ class AutoCastGUI(QMainWindow):
 
         threading.Thread(target=do_play, daemon=True).start()
 
-    # ── Window Cast ──────────────────────────────────────────────────────────
+    # ── Streaming (shared) ──────────────────────────────────────────────────
+
+    def _start_stream(self, source_type: str, source_id, device: Device, label: str):
+        fps = self.fps_slider.value()
+        bitrate = self.bitrate_slider.value() * 200 if self.bitrate_slider.value() > 0 else 0
+        self.streamer.fps = fps
+        self.streamer.bitrate_limit = bitrate
+        self.is_streaming = True
+
+        def do_cast():
+            try:
+                if source_type == "window":
+                    self.streamer.start_window(source_id)
+                else:
+                    self.streamer.start_monitor(source_id)
+
+                loop = asyncio.new_event_loop()
+                server = MediaServer()
+                streamer_ref = self.streamer
+
+                async def stream_handle(request):
+                    from aiohttp import web
+                    response = web.StreamResponse(
+                        status=200, reason="OK",
+                        headers={
+                            "Content-Type": "multipart/x-mixed-replace; boundary=frame",
+                            "Cache-Control": "no-cache",
+                            "Connection": "keep-alive",
+                        },
+                    )
+                    await response.prepare(request)
+                    while self.is_streaming:
+                        frame = streamer_ref.get_frame()
+                        if frame:
+                            await response.write(
+                                b"--frame\r\n"
+                                b"Content-Type: image/jpeg\r\n"
+                                b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n"
+                                + frame + b"\r\n"
+                            )
+                        await asyncio.sleep(1.0 / streamer_ref.fps)
+                    return response
+
+                server._app.router.add_get("/stream", stream_handle)
+                loop.run_until_complete(server.start(target_ip=device.ip))
+                stream_url = f"http://{server._local_ip}:{server._actual_port}/stream"
+
+                if device.device_type == DeviceType.DLNA:
+                    loop.run_until_complete(dlna_controller.play(device, stream_url, "image/jpeg"))
+                elif device.device_type == DeviceType.AIRPLAY:
+                    dlna_device = loop.run_until_complete(dlna_controller.discover_dlna(device.ip))
+                    if dlna_device:
+                        loop.run_until_complete(dlna_controller.play(dlna_device, stream_url, "image/jpeg"))
+
+                self.bridge.status_update.emit(f"Casting {label} to {device.name}")
+            except Exception as e:
+                self.bridge.error_occurred.emit(str(e))
+                self.is_streaming = False
+
+        threading.Thread(target=do_cast, daemon=True).start()
+
+    # ── Window Cast ─────────────────────────────────────────────────────────
 
     def _refresh_windows(self):
         self.window_list.clear()
         self.windows_list = list_windows()
-
         for w in self.windows_list:
             is_browser = w.process_name.lower().startswith(("chrome", "firefox", "edge"))
             icon = "◆" if is_browser else "■"
             item = QListWidgetItem(f"{icon}  {w.title}")
             item.setToolTip(f"Process: {w.process_name}\nPID: {w.pid}\nSize: {w.rect[2]}x{w.rect[3]}")
             if is_browser:
-                item.setForeground(QColor("#22d3ee"))
+                item.setForeground(QColor("#38bdf8"))
             self.window_list.addItem(item)
-
-        self.window_info_label.setText(f"{len(self.windows_list)} window(s) found")
+        self.window_info_label.setText(f"{len(self.windows_list)} window(s)")
 
     def _on_window_select(self, index: int):
         if 0 <= index < len(self.windows_list):
@@ -1088,64 +1232,21 @@ class AutoCastGUI(QMainWindow):
         if not self.selected_device:
             QMessageBox.warning(self, "Warning", "Please select a target device first.")
             return
-
         idx = self.window_list.currentRow()
         if idx < 0 or idx >= len(self.windows_list):
             QMessageBox.warning(self, "Warning", "Please select a window to cast.")
             return
 
         window = self.windows_list[idx]
-        device = self.selected_device
-        fps = self.fps_slider.value()
-
-        self.status_label.setText(f"Casting '{window.title}' to {device.name}...")
-        self.is_streaming = True
         self.cast_window_btn.setEnabled(False)
-        self.streamer.fps = fps
+        self.status_label.setText(f"Casting '{window.title}'...")
+        self._start_stream("window", window.hwnd, self.selected_device, f"'{window.title}'")
 
-        def do_cast():
-            try:
-                self.streamer.start_window(window.hwnd)
-
-                loop = asyncio.new_event_loop()
-                server = MediaServer()
-                loop.run_until_complete(server.start())
-
-                streamer_ref = self.streamer
-
-                async def stream_handle(request):
-                    from aiohttp import web
-                    frame = streamer_ref.get_frame()
-                    if frame:
-                        return web.Response(
-                            body=frame,
-                            content_type="image/jpeg",
-                            headers={"Cache-Control": "no-cache"},
-                        )
-                    return web.Response(status=204)
-
-                server._app.router.add_get("/stream", stream_handle)
-                stream_url = f"http://{server._local_ip}:{server._actual_port}/stream"
-
-                if device.device_type == DeviceType.DLNA:
-                    loop.run_until_complete(dlna_controller.play(device, stream_url, "image/jpeg"))
-                elif device.device_type == DeviceType.AIRPLAY:
-                    pass
-
-                self.bridge.status_update.emit(f"Casting '{window.title}' to {device.name}")
-            except Exception as e:
-                self.bridge.error_occurred.emit(str(e))
-                self.is_streaming = False
-                self.cast_window_btn.setEnabled(True)
-
-        threading.Thread(target=do_cast, daemon=True).start()
-
-    # ── Screen Cast ──────────────────────────────────────────────────────────
+    # ── Screen Cast ─────────────────────────────────────────────────────────
 
     def _refresh_monitors(self):
         self.monitor_combo.clear()
         self.monitors_list = get_monitors()
-
         for m in self.monitors_list:
             self.monitor_combo.addItem(m["name"])
 
@@ -1154,59 +1255,17 @@ class AutoCastGUI(QMainWindow):
         if not self.selected_device:
             QMessageBox.warning(self, "Warning", "Please select a target device first.")
             return
-
         idx = self.monitor_combo.currentIndex()
         if idx < 0:
             QMessageBox.warning(self, "Warning", "Please select a monitor.")
             return
 
         monitor = self.monitors_list[idx]
-        device = self.selected_device
-        fps = self.fps_slider.value()
-
-        self.status_label.setText(f"Casting {monitor['name']} to {device.name}...")
-        self.is_streaming = True
         self.cast_screen_btn.setEnabled(False)
-        self.streamer.fps = fps
+        self.status_label.setText(f"Casting {monitor['name']}...")
+        self._start_stream("monitor", monitor["index"], self.selected_device, monitor["name"])
 
-        def do_cast():
-            try:
-                self.streamer.start_monitor(monitor["index"])
-
-                loop = asyncio.new_event_loop()
-                server = MediaServer()
-                loop.run_until_complete(server.start())
-
-                streamer_ref = self.streamer
-
-                async def stream_handle(request):
-                    from aiohttp import web
-                    frame = streamer_ref.get_frame()
-                    if frame:
-                        return web.Response(
-                            body=frame,
-                            content_type="image/jpeg",
-                            headers={"Cache-Control": "no-cache"},
-                        )
-                    return web.Response(status=204)
-
-                server._app.router.add_get("/stream", stream_handle)
-                stream_url = f"http://{server._local_ip}:{server._actual_port}/stream"
-
-                if device.device_type == DeviceType.DLNA:
-                    loop.run_until_complete(dlna_controller.play(device, stream_url, "image/jpeg"))
-                elif device.device_type == DeviceType.AIRPLAY:
-                    pass
-
-                self.bridge.status_update.emit(f"Casting {monitor['name']} to {device.name}")
-            except Exception as e:
-                self.bridge.error_occurred.emit(str(e))
-                self.is_streaming = False
-                self.cast_screen_btn.setEnabled(True)
-
-        threading.Thread(target=do_cast, daemon=True).start()
-
-    # ── Stop & Volume ────────────────────────────────────────────────────────
+    # ── Stop & Volume ───────────────────────────────────────────────────────
 
     def _on_stop(self):
         self._animate_button_click(self.stop_btn)
@@ -1241,10 +1300,8 @@ class AutoCastGUI(QMainWindow):
 
     def _on_volume_change(self, value: int):
         self.volume_value.setText(f"{value}%")
-
         if not self.selected_device or not self.is_playing:
             return
-
         device = self.selected_device
 
         def do_volume():
@@ -1259,7 +1316,16 @@ class AutoCastGUI(QMainWindow):
 
         threading.Thread(target=do_volume, daemon=True).start()
 
-    # ── Status ───────────────────────────────────────────────────────────────
+    def _on_bitrate_change(self, value: int):
+        if value == 0:
+            kbps = 0
+            self.bitrate_value.setText("Unlimited")
+        else:
+            kbps = value * 200
+            self.bitrate_value.setText(f"{kbps} KB/s")
+        self.streamer.bitrate_limit = kbps
+
+    # ── Status ──────────────────────────────────────────────────────────────
 
     def _on_status_update(self, msg: str):
         self.status_label.setText(msg)

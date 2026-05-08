@@ -89,7 +89,7 @@ def get_monitors() -> list[dict]:
         return monitors
 
 
-def capture_window(hwnd: int) -> bytes:
+def capture_window(hwnd: int, quality: int = 70, scale: float = 1.0) -> bytes:
     """Capture a specific window and return JPEG bytes."""
     try:
         rect = win32gui.GetWindowRect(hwnd)
@@ -105,14 +105,20 @@ def capture_window(hwnd: int) -> bytes:
             screenshot = sct.grab(monitor)
             img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
 
+            if scale < 1.0:
+                img = img.resize(
+                    (int(img.width * scale), int(img.height * scale)),
+                    Image.Resampling.LANCZOS,
+                )
+
             buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=70)
+            img.save(buf, format="JPEG", quality=quality)
             return buf.getvalue()
     except Exception:
         return b""
 
 
-def capture_monitor(monitor_index: int = 1) -> bytes:
+def capture_monitor(monitor_index: int = 1, quality: int = 70, scale: float = 1.0) -> bytes:
     """Capture a specific monitor and return JPEG bytes."""
     try:
         with mss.mss() as sct:
@@ -121,8 +127,14 @@ def capture_monitor(monitor_index: int = 1) -> bytes:
             screenshot = sct.grab(sct.monitors[monitor_index])
             img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
 
+            if scale < 1.0:
+                img = img.resize(
+                    (int(img.width * scale), int(img.height * scale)),
+                    Image.Resampling.LANCZOS,
+                )
+
             buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=70)
+            img.save(buf, format="JPEG", quality=quality)
             return buf.getvalue()
     except Exception:
         return b""
@@ -131,15 +143,20 @@ def capture_monitor(monitor_index: int = 1) -> bytes:
 class ScreenStreamer:
     """Continuously captures and serves frames via HTTP."""
 
-    def __init__(self, fps: int = 10, quality: int = 70):
+    def __init__(self, fps: int = 10, quality: int = 70, bitrate_limit: int = 0):
         self.fps = fps
         self.quality = quality
+        self.bitrate_limit = bitrate_limit  # KB/s, 0 = unlimited
         self._running = False
         self._frame: bytes = b""
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._target_hwnd: Optional[int] = None
         self._target_monitor: Optional[int] = None
+        # Bitrate tracking
+        self._bytes_sent: list[tuple[float, int]] = []
+        self._current_quality = quality
+        self._current_scale = 1.0
 
     def start_window(self, hwnd: int):
         """Start capturing a specific window."""
@@ -147,6 +164,9 @@ class ScreenStreamer:
         self._target_hwnd = hwnd
         self._target_monitor = None
         self._running = True
+        self._bytes_sent = []
+        self._current_quality = self.quality
+        self._current_scale = 1.0
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
 
@@ -156,6 +176,9 @@ class ScreenStreamer:
         self._target_hwnd = None
         self._target_monitor = monitor_index
         self._running = True
+        self._bytes_sent = []
+        self._current_quality = self.quality
+        self._current_scale = 1.0
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
 
@@ -171,6 +194,40 @@ class ScreenStreamer:
         with self._lock:
             return self._frame
 
+    def _track_bitrate(self, frame_size: int):
+        """Track bitrate and adjust quality/scale dynamically."""
+        now = time.time()
+        self._bytes_sent.append((now, frame_size))
+        # Keep last 1 second of data for faster reaction
+        cutoff = now - 1.0
+        self._bytes_sent = [(t, b) for t, b in self._bytes_sent if t > cutoff]
+
+        if self.bitrate_limit <= 0:
+            return
+
+        # Calculate current bitrate (KB/s)
+        if len(self._bytes_sent) < 2:
+            return
+        total_bytes = sum(b for _, b in self._bytes_sent)
+        duration = self._bytes_sent[-1][0] - self._bytes_sent[0][0]
+        if duration <= 0:
+            return
+        current_kbps = (total_bytes / 1024.0) / duration
+
+        # Aggressive adjustment
+        if current_kbps > self.bitrate_limit:
+            if self._current_quality > 5:
+                drop = 10 if current_kbps > self.bitrate_limit * 1.5 else 5
+                self._current_quality = max(5, self._current_quality - drop)
+            else:
+                # Quality at minimum, scale down resolution
+                self._current_scale = max(0.25, self._current_scale - 0.1)
+        elif current_kbps < self.bitrate_limit * 0.7:
+            if self._current_scale < 1.0:
+                self._current_scale = min(1.0, self._current_scale + 0.05)
+            else:
+                self._current_quality = min(self.quality, self._current_quality + 1)
+
     def _capture_loop(self):
         """Main capture loop running in a thread."""
         interval = 1.0 / self.fps
@@ -180,13 +237,14 @@ class ScreenStreamer:
 
             try:
                 if self._target_hwnd is not None:
-                    frame = capture_window(self._target_hwnd)
+                    frame = capture_window(self._target_hwnd, self._current_quality, self._current_scale)
                 elif self._target_monitor is not None:
-                    frame = capture_monitor(self._target_monitor)
+                    frame = capture_monitor(self._target_monitor, self._current_quality, self._current_scale)
                 else:
                     frame = b""
 
                 if frame:
+                    self._track_bitrate(len(frame))
                     with self._lock:
                         self._frame = frame
             except Exception:

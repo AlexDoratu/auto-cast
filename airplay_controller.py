@@ -1,5 +1,6 @@
 """AirPlay device control via pyatv."""
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -19,17 +20,24 @@ def _make_config(device: Device) -> pyatv.conf.AppleTV:
             identifier=device.uid or device.ip,
             protocol=Protocol.AirPlay,
             port=device.port,
+            properties={},
         )
     )
     return config
 
 
+async def _connect(device: Device):
+    """Connect to an AirPlay device."""
+    config = _make_config(device)
+    loop = asyncio.get_running_loop()
+    return await pyatv.connect(config, loop)
+
+
 async def play(device: Device, media_path: str):
     """Play a media file on an AirPlay device."""
-    config = _make_config(device)
     atv = None
     try:
-        atv = await pyatv.connect(config)
+        atv = await _connect(device)
         path = Path(media_path)
         if path.exists():
             await atv.stream.stream_file(str(path))
@@ -47,10 +55,9 @@ async def play(device: Device, media_path: str):
 
 async def stop(device: Device):
     """Stop playback on an AirPlay device."""
-    config = _make_config(device)
     atv = None
     try:
-        atv = await pyatv.connect(config)
+        atv = await _connect(device)
         await atv.remote_control.stop()
         logger.info(f"AirPlay: stopped on {device.name}")
     except Exception as e:
@@ -62,10 +69,9 @@ async def stop(device: Device):
 
 async def set_volume(device: Device, volume: int):
     """Set volume (0-100) on an AirPlay device."""
-    config = _make_config(device)
     atv = None
     try:
-        atv = await pyatv.connect(config)
+        atv = await _connect(device)
         pyatv_volume = volume / 100.0
         await atv.remote_control.set_volume(pyatv_volume)
         logger.info(f"AirPlay: volume set to {volume} on {device.name}")

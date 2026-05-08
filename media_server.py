@@ -27,15 +27,19 @@ class MediaServer:
         self._local_ip: str = ""
         self._registered_files: list[str] = []
 
-    async def start(self) -> tuple[str, int]:
-        """Start the server and return (local_ip, port)."""
+    async def start(self, target_ip: str = "8.8.8.8") -> tuple[str, int]:
+        """Start the server and return (local_ip, port).
+
+        Args:
+            target_ip: IP of the target device, used to pick the correct local interface.
+        """
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self.host, self.port)
         await self._site.start()
 
         self._actual_port = self._site._server.sockets[0].getsockname()[1]
-        self._local_ip = self._get_local_ip()
+        self._local_ip = self._get_local_ip(target_ip)
 
         logger.info(f"Media server started at http://{self._local_ip}:{self._actual_port}")
         return self._local_ip, self._actual_port
@@ -91,11 +95,11 @@ class MediaServer:
             self.register_file(f)
 
     @staticmethod
-    def _get_local_ip() -> str:
-        """Get the local IP address that can reach the network."""
+    def _get_local_ip(target_ip: str = "8.8.8.8") -> str:
+        """Get the local IP address that can reach target_ip."""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
+            s.connect((target_ip, 80))
             ip = s.getsockname()[0]
             s.close()
             return ip
