@@ -3,11 +3,13 @@
 import asyncio
 import logging
 import socket
+import struct
 import xml.etree.ElementTree as ET
 from typing import Optional
 from urllib.parse import urlparse
 
 import aiohttp
+import psutil
 from zeroconf import ServiceBrowser, Zeroconf
 from zeroconf.asyncio import AsyncZeroconf
 
@@ -23,44 +25,90 @@ SSDP_ST = "urn:schemas-upnp-org:device:MediaRenderer:1"
 SSDP_REQUEST = (
     f"M-SEARCH * HTTP/1.1\r\n"
     f"HOST: {SSDP_ADDR}:{SSDP_PORT}\r\n"
-    f"MAN: \"ssdp:discover\"\r\n"
+    f'MAN: "ssdp:discover"\r\n'
     f"MX: {SSDP_MX}\r\n"
     f"ST: {SSDP_ST}\r\n"
     f"\r\n"
 )
 
 
+def _get_lan_ips() -> list[str]:
+    """Return non-loopback, non-VPN IPv4 addresses suitable for SSDP multicast."""
+    skip_prefixes = ("127.", "169.254.", "198.18.")
+    skip_names_lower = ("loopback", "radmin", "tailscale", "mihomo", "vethernet")
+    ips = []
+    try:
+        for name, addrs in psutil.net_if_addrs().items():
+            name_lower = name.lower()
+            if any(k in name_lower for k in skip_names_lower):
+                continue
+            for addr in addrs:
+                if addr.family == socket.AF_INET and not addr.address.startswith(skip_prefixes):
+                    ips.append(addr.address)
+    except Exception as e:
+        logger.warning(f"psutil failed, falling back to socket: {e}")
+        try:
+            hostname = socket.gethostname()
+            ip = socket.gethostbyname(hostname)
+            if not ip.startswith(skip_prefixes):
+                ips.append(ip)
+        except Exception:
+            pass
+
+    logger.info(f"LAN IPs for SSDP: {ips}")
+    return ips
+
+
 async def scan_dlna(timeout: float = 5.0) -> list[Device]:
     """Scan for DLNA/UPnP MediaRenderer devices via SSDP."""
-    devices = []
-    seen = set()
+    lan_ips = _get_lan_ips()
+    if not lan_ips:
+        logger.warning("No LAN interfaces found for SSDP scan")
+        return []
 
+    all_locations: set[str] = set()
+
+    for ip in lan_ips:
+        try:
+            locations = await _ssdp_search(ip, timeout)
+            all_locations.update(locations)
+        except Exception as e:
+            logger.debug(f"SSDP scan on {ip} failed: {e}")
+
+    devices = []
+    for location in all_locations:
+        device = await _fetch_dlna_description(location)
+        if device:
+            devices.append(device)
+
+    return devices
+
+
+async def _ssdp_search(local_ip: str, timeout: float) -> list[str]:
+    """Send SSDP M-SEARCH from a specific interface and collect response locations."""
     loop = asyncio.get_event_loop()
     transport, protocol = await loop.create_datagram_endpoint(
         lambda: _SSDPProtocol(),
-        remote_addr=(SSDP_ADDR, SSDP_PORT),
+        local_addr=(local_ip, 0),
     )
 
     try:
         sock = transport.get_extra_info("socket")
         if sock:
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+            mreq = struct.pack(
+                "4s4s",
+                socket.inet_aton(SSDP_ADDR),
+                socket.inet_aton(local_ip),
+            )
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
 
         transport.sendto(SSDP_REQUEST.encode(), (SSDP_ADDR, SSDP_PORT))
         await asyncio.sleep(timeout)
-
-        for location in protocol.locations:
-            if location in seen:
-                continue
-            seen.add(location)
-            device = await _fetch_dlna_description(location)
-            if device:
-                devices.append(device)
+        return protocol.locations
     finally:
         transport.close()
-
-    return devices
 
 
 class _SSDPProtocol(asyncio.DatagramProtocol):
@@ -70,9 +118,6 @@ class _SSDPProtocol(asyncio.DatagramProtocol):
 
     def connection_made(self, transport):
         self.transport = transport
-        sock = transport.get_extra_info("socket")
-        if sock:
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
 
     def datagram_received(self, data: bytes, addr: tuple):
         try:

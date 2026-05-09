@@ -1,9 +1,19 @@
 """Auto-Cast GUI — Modern PySide6 interface for DLNA/AirPlay casting."""
 
 import asyncio
+import logging
 import sys
 import threading
 from pathlib import Path
+
+# Log to file for debugging packaged exe
+_log_path = Path(__file__).parent / "autocast-debug.log"
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.FileHandler(_log_path, encoding="utf-8")],
+)
+logger = logging.getLogger("autocast-gui")
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -685,6 +695,7 @@ class AutoCastGUI(QMainWindow):
         self.scan_btn.setObjectName("scanBtn")
         self.scan_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.scan_btn.setMinimumWidth(140)
+        self._scan_anim = ScanAnimation(self.scan_btn)
         header.addWidget(self.scan_btn)
 
         # Auto-refresh toggle
@@ -1058,10 +1069,13 @@ class AutoCastGUI(QMainWindow):
 
         def do_scan():
             try:
+                logger.info("Auto-scan starting...")
                 loop = asyncio.new_event_loop()
                 devices = loop.run_until_complete(scan_all(timeout=4.0))
+                logger.info(f"Auto-scan complete: {len(devices)} device(s)")
                 self.bridge.devices_found.emit(devices)
             except Exception as e:
+                logger.exception("Auto-scan failed")
                 self.bridge.error_occurred.emit(str(e))
 
         threading.Thread(target=do_scan, daemon=True).start()
@@ -1074,10 +1088,13 @@ class AutoCastGUI(QMainWindow):
 
         def do_scan():
             try:
+                logger.info("Starting device scan...")
                 loop = asyncio.new_event_loop()
                 devices = loop.run_until_complete(scan_all(timeout=5.0))
+                logger.info(f"Scan complete: {len(devices)} device(s) found")
                 self.bridge.devices_found.emit(devices)
             except Exception as e:
+                logger.exception("Scan failed")
                 self.bridge.error_occurred.emit(str(e))
 
         threading.Thread(target=do_scan, daemon=True).start()
