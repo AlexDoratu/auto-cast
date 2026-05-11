@@ -5,7 +5,7 @@ import os
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from device import Device, DeviceType
-from scanner import _SSDPProtocol
+from scanner import _SSDPProtocol, _find_control_url
 from dlna_controller import _parse_soap_response, _build_didl_lite
 
 
@@ -115,6 +115,26 @@ class TestSSDPProtocol:
         proto.datagram_received(b"\x00\x01\x02", ("1.1.1.1", 1900))
         assert proto.locations == []
 
+    def test_find_rendering_control_url(self):
+        import xml.etree.ElementTree as ET
+        xml = """
+        <device xmlns="urn:schemas-upnp-org:device-1-0">
+          <serviceList>
+            <service>
+              <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+              <controlURL>/upnp/control/avtransport1</controlURL>
+            </service>
+            <service>
+              <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
+              <controlURL>/upnp/control/renderingcontrol1</controlURL>
+            </service>
+          </serviceList>
+        </device>
+        """
+        root = ET.fromstring(xml)
+        ns = {"upnp": "urn:schemas-upnp-org:device-1-0"}
+        assert _find_control_url(root, ns, "RenderingControl") == "/upnp/control/renderingcontrol1"
+
 
 # --- SOAP Response Tests ---
 
@@ -169,6 +189,58 @@ class TestDIDLLite:
         assert "song.mp3" in didl
 
 
+# --- Resume State Tests ---
+
+class TestResumeState:
+    def test_state_round_trip(self, tmp_path):
+        from app_state import ResumeState, load_state, save_state
+        path = tmp_path / "state.json"
+        state = ResumeState(device_name="TV", device_type="dlna", device_ip="1.2.3.4", source_type="live", live_url="https://example.com/live")
+        save_state(state, path)
+        assert load_state(path) == state
+
+    def test_matches_device_by_name_ip_and_type(self):
+        from app_state import ResumeState, matches_device
+        state = ResumeState(device_name="TV", device_type="dlna", device_ip="1.2.3.4")
+        device = Device("TV", DeviceType.DLNA, "1.2.3.4", 5000)
+        assert matches_device(state, device)
+
+    def test_matches_device_rejects_ip_only_match(self):
+        from app_state import ResumeState, matches_device
+        state = ResumeState(device_type="dlna", device_ip="1.2.3.4")
+        device = Device("TV", DeviceType.DLNA, "1.2.3.4", 5000)
+        assert not matches_device(state, device)
+
+    def test_matches_device_rejects_uid_missing_on_device(self):
+        from app_state import ResumeState, matches_device
+        state = ResumeState(device_name="TV", device_type="dlna", device_ip="1.2.3.4", device_uid="uuid:tv")
+        device = Device("TV", DeviceType.DLNA, "1.2.3.4", 5000)
+        assert not matches_device(state, device)
+
+    def test_redact_url_removes_query_tokens(self):
+        from app_state import redact_url
+        url = redact_url("https://live.bilibili.com/440006?session_id=secret&token=value")
+        assert url == "https://live.bilibili.com/440006"
+
+    def test_matches_device_rejects_uid_with_different_ip(self):
+        from app_state import ResumeState, matches_device
+        state = ResumeState(device_name="TV", device_type="dlna", device_ip="1.2.3.4", device_uid="uuid:tv")
+        device = Device("TV", DeviceType.DLNA, "5.6.7.8", 5000, uid="uuid:tv")
+        assert not matches_device(state, device)
+
+    def test_load_state_redacts_legacy_live_url(self, tmp_path):
+        from app_state import load_state
+        path = tmp_path / "state.json"
+        path.write_text('{"live_url":"https://live.bilibili.com/440006?session_id=secret"}', encoding="utf-8")
+        assert load_state(path).live_url == "https://live.bilibili.com/440006"
+
+    def test_matches_device_rejects_different_type(self):
+        from app_state import ResumeState, matches_device
+        state = ResumeState(device_name="TV", device_type="airplay", device_ip="1.2.3.4")
+        device = Device("TV", DeviceType.DLNA, "1.2.3.4", 5000)
+        assert not matches_device(state, device)
+
+
 # --- Media Server Tests ---
 
 class TestFFmpegTranscoder:
@@ -185,6 +257,14 @@ class TestFFmpegTranscoder:
         command = build_ffmpeg_command("ffmpeg", "http://127.0.0.1/stream", "mjpeg")
         assert command[command.index("-f") + 1] == "mjpeg"
         assert "-reconnect" not in command
+
+    def test_build_ffmpeg_command_sets_adaptive_low_latency_video_options(self):
+        from ffmpeg_transcoder import build_ffmpeg_command
+        command = build_ffmpeg_command("ffmpeg", "https://cdn.example.com/live.m3u8")
+        assert "-maxrate" in command
+        assert "-bufsize" in command
+        assert command[command.index("-g") + 1] == "60"
+        assert command[command.index("-sc_threshold") + 1] == "0"
 
     @patch("ffmpeg_transcoder.shutil.which", return_value=None)
     def test_ffmpeg_transcoder_errors_when_ffmpeg_missing(self, _which):
@@ -442,14 +522,27 @@ class TestLiveResolver:
         with pytest.raises(RuntimeError):
             resolve_live_url("https://live.bilibili.com/123")
 
+    @patch("live_resolver.yt_dlp", None)
     @patch("live_resolver.shutil.which", side_effect=lambda name: "yt-dlp" if name == "yt-dlp" else None)
     @patch("live_resolver.subprocess.run")
-    def test_resolve_live_url_uses_ytdlp(self, run_mock, _which):
+    def test_resolve_live_url_uses_ytdlp_command(self, run_mock, _which):
         from live_resolver import resolve_live_url
         run_mock.return_value = MagicMock(returncode=0, stdout="https://cdn.example.com/live.m3u8\n")
         url, content_type = resolve_live_url("https://live.bilibili.com/123")
         assert url == "https://cdn.example.com/live.m3u8"
         assert content_type == "application/vnd.apple.mpegurl"
+
+    def test_extract_stream_url_ignores_non_string_facade_url(self):
+        from live_resolver import _extract_stream_url
+
+        class FacadeStream:
+            pass
+
+        url = _extract_stream_url({
+            "url": FacadeStream(),
+            "formats": [{"url": "https://cdn.example.com/live.m3u8", "protocol": "m3u8_native", "height": 1080}],
+        })
+        assert url == "https://cdn.example.com/live.m3u8"
 
     def test_resolve_live_url_rejects_non_http_url(self):
         from live_resolver import resolve_live_url
@@ -487,6 +580,18 @@ class TestDLNAController:
         d = Device("TV", DeviceType.DLNA, "1.1.1.1", 5000, control_url="/AVTransport/control")
         url = _get_rendering_control_url(d)
         assert "RenderingControl" in url
+
+    def test_get_rendering_control_url_uses_discovered_service_url(self):
+        from dlna_controller import _get_rendering_control_url
+        d = Device(
+            "TV",
+            DeviceType.DLNA,
+            "1.1.1.1",
+            5000,
+            control_url="/upnp/control/avtransport1",
+            rendering_control_url="/upnp/control/renderingcontrol1",
+        )
+        assert _get_rendering_control_url(d) == "http://1.1.1.1:5000/upnp/control/renderingcontrol1"
 
     def test_get_rendering_control_url_no_control(self):
         from dlna_controller import _get_rendering_control_url

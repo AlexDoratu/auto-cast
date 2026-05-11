@@ -34,7 +34,8 @@ async def discover_dlna(ip: str) -> Device | None:
                         ns = {"upnp": "urn:schemas-upnp-org:device-1-0"}
                         name_el = root.find(".//upnp:friendlyName", ns) or root.find(".//friendlyName")
                         name = name_el.text.strip() if name_el is not None and name_el.text else ip
-                        ctrl = _find_control_url_xml(root, ns)
+                        ctrl = _find_control_url_xml(root, ns, "AVTransport")
+                        rendering_ctrl = _find_control_url_xml(root, ns, "RenderingControl")
                         if not ctrl:
                             continue
                         return Device(
@@ -43,14 +44,15 @@ async def discover_dlna(ip: str) -> Device | None:
                             ip=ip,
                             port=port,
                             control_url=ctrl,
+                            rendering_control_url=rendering_ctrl,
                         )
                 except Exception:
                     continue
     return None
 
 
-def _find_control_url_xml(root, ns) -> str | None:
-    """Find AVTransport control URL from parsed XML root."""
+def _find_control_url_xml(root, ns, service_name: str = "AVTransport") -> str | None:
+    """Find a service control URL from parsed XML root."""
     for svc in root.iter():
         tag = svc.tag.split("}")[-1] if "}" in svc.tag else svc.tag
         if tag == "service":
@@ -62,7 +64,7 @@ def _find_control_url_xml(root, ns) -> str | None:
                     svc_type = child.text or ""
                 elif ctag == "controlURL":
                     ctrl_url = child.text or ""
-            if "AVTransport" in svc_type and ctrl_url:
+            if service_name in svc_type and ctrl_url:
                 return ctrl_url
     return None
 
@@ -114,6 +116,11 @@ async def pause(device: Device):
 
 async def set_volume(device: Device, volume: int):
     """Set volume (0-100)."""
+    if not device.rendering_control_url:
+        discovered = await discover_dlna(device.ip)
+        if discovered and discovered.rendering_control_url:
+            device.rendering_control_url = discovered.rendering_control_url
+            device.port = discovered.port
     control_url = _get_rendering_control_url(device)
     result = await _soap_action(
         device, control_url, RENDERINGCONTROL_NS, "SetVolume",
@@ -149,14 +156,19 @@ def _get_control_url(device: Device) -> str:
 
 def _get_rendering_control_url(device: Device) -> str:
     base = f"http://{device.ip}:{device.port}"
-    if device.control_url:
-        path = device.control_url.replace("AVTransport", "RenderingControl")
-        if path.startswith("http"):
-            return path
-        if not path.startswith("/"):
-            path = f"/{path}"
+    control_url = device.rendering_control_url or _guess_rendering_control_url(device.control_url)
+    if control_url:
+        if control_url.startswith("http"):
+            return control_url
+        path = control_url if control_url.startswith("/") else f"/{control_url}"
         return f"{base}{path}"
     return f"{base}/RenderingControl/control"
+
+
+def _guess_rendering_control_url(control_url: str | None) -> str | None:
+    if not control_url:
+        return None
+    return control_url.replace("AVTransport", "RenderingControl")
 
 
 def _build_didl_lite(media_url: str, content_type: str) -> str:

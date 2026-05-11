@@ -78,24 +78,29 @@ class MediaServer:
         return self._local_ip, self._actual_port
 
     def stop_background(self):
-        if not self._loop:
+        loop = self._loop
+        if not loop:
             return
-        future = asyncio.run_coroutine_threadsafe(self.stop(), self._loop)
-        future.result(timeout=10)
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        if self._thread:
-            self._thread.join(timeout=5)
-            self._thread = None
-        self._loop = None
+        try:
+            future = asyncio.run_coroutine_threadsafe(self.stop(), loop)
+            future.result(timeout=10)
+        except Exception as exc:
+            logger.warning(f"Media server shutdown timed out or failed: {exc}")
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            if self._thread:
+                self._thread.join(timeout=5)
+                self._thread = None
+            self._loop = None
 
     def get_url(self, filepath: str) -> str:
         """Get the HTTP URL for a local media file."""
         file_id = self.register_file(filepath)
         return f"http://{self._local_ip}:{self._actual_port}/media/{file_id}"
 
-    def register_live_stream(self, input_url: str, input_format: str = "url") -> str:
+    def register_live_stream(self, input_url: str, input_format: str = "url", video_bitrate: str = "3500k") -> str:
         stream_id = uuid4().hex
-        self._live_streams[stream_id] = FFmpegTranscoder(input_url, input_format=input_format)
+        self._live_streams[stream_id] = FFmpegTranscoder(input_url, input_format=input_format, video_bitrate=video_bitrate)
         return f"http://{self._local_ip}:{self._actual_port}/live/{stream_id}.ts"
 
     async def _handle_live_stream(self, request: web.Request) -> web.StreamResponse:

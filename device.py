@@ -18,6 +18,7 @@ class Device:
     ip: str
     port: int
     control_url: Optional[str] = None
+    rendering_control_url: Optional[str] = None
     manufacturer: str = ""
     model: str = ""
     uid: str = ""

@@ -1,12 +1,20 @@
 """Resolve live page URLs into playable media stream URLs."""
 
+import logging
 import shutil
 import subprocess
 from urllib.parse import urlparse
 
+try:
+    import yt_dlp
+except ImportError:
+    yt_dlp = None
+
 
 HLS_CONTENT_TYPE = "application/vnd.apple.mpegurl"
 DEFAULT_CONTENT_TYPE = "video/mp4"
+
+logger = logging.getLogger(__name__)
 
 
 def resolve_live_url(url: str) -> tuple[str, str]:
@@ -16,7 +24,7 @@ def resolve_live_url(url: str) -> tuple[str, str]:
     if not _is_http_url(normalized_url):
         raise ValueError("Live URL must start with http:// or https://")
 
-    resolved_url = _resolve_with_streamlink(normalized_url) or _resolve_with_ytdlp(normalized_url)
+    resolved_url = _resolve_with_ytdlp_api(normalized_url) or _resolve_with_ytdlp(normalized_url) or _resolve_with_streamlink(normalized_url)
     if not resolved_url:
         raise RuntimeError("Could not resolve live stream URL. Install streamlink or yt-dlp, or use a direct media stream URL.")
     return resolved_url, guess_content_type(resolved_url)
@@ -33,6 +41,40 @@ def guess_content_type(url: str) -> str:
     if path.endswith(".mp4"):
         return "video/mp4"
     return DEFAULT_CONTENT_TYPE
+
+
+def _resolve_with_ytdlp_api(url: str) -> str | None:
+    if not yt_dlp:
+        return None
+    try:
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "noplaylist": True}) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as exc:
+        logger.warning(f"yt-dlp API failed to resolve live URL: {exc}")
+        return None
+    return _extract_stream_url(info)
+
+
+def _extract_stream_url(info: dict | None) -> str | None:
+    if not info:
+        return None
+    direct_url = info.get("url")
+    if isinstance(direct_url, str) and _is_http_url(direct_url):
+        return direct_url
+    formats = info.get("formats") or []
+    for item in sorted(formats, key=_format_score, reverse=True):
+        stream_url = item.get("url")
+        if isinstance(stream_url, str) and _is_http_url(stream_url):
+            return stream_url
+    return None
+
+
+def _format_score(item: dict) -> tuple[int, int, int]:
+    protocol = str(item.get("protocol") or "")
+    height = int(item.get("height") or 0)
+    tbr = int(item.get("tbr") or 0)
+    protocol_score = 2 if protocol in {"m3u8", "m3u8_native"} else 1
+    return protocol_score, height, tbr
 
 
 def _resolve_with_streamlink(url: str) -> str | None:

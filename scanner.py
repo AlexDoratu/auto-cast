@@ -163,7 +163,8 @@ async def _fetch_dlna_description(location: str) -> Optional[Device]:
         model = find_text("modelName")
         udn = find_text("UDN")
 
-        control_url = _find_control_url(device_elem, ns)
+        control_url = _find_control_url(device_elem, ns, "AVTransport")
+        rendering_control_url = _find_control_url(device_elem, ns, "RenderingControl")
 
         parsed = urlparse(location)
         ip = parsed.hostname
@@ -175,6 +176,7 @@ async def _fetch_dlna_description(location: str) -> Optional[Device]:
             ip=ip,
             port=port,
             control_url=control_url,
+            rendering_control_url=rendering_control_url,
             manufacturer=manufacturer,
             model=model,
             uid=udn,
@@ -184,12 +186,12 @@ async def _fetch_dlna_description(location: str) -> Optional[Device]:
         return None
 
 
-def _find_control_url(device_elem, ns) -> Optional[str]:
-    """Find AVTransport control URL from device description."""
+def _find_control_url(device_elem, ns, service_name: str = "AVTransport") -> Optional[str]:
+    """Find a service control URL from device description."""
     for service_list in device_elem.findall(".//upnp:serviceList", ns):
         for service in service_list.findall("upnp:service", ns):
             st = service.find("upnp:serviceType", ns)
-            if st is not None and "AVTransport" in (st.text or ""):
+            if st is not None and service_name in (st.text or ""):
                 scp = service.find("upnp:controlURL", ns)
                 if scp is not None and scp.text:
                     return scp.text
@@ -197,7 +199,7 @@ def _find_control_url(device_elem, ns) -> Optional[str]:
     for service_list in device_elem.findall(".//serviceList"):
         for service in service_list.findall("service"):
             st = service.find("serviceType")
-            if st is not None and "AVTransport" in (st.text or ""):
+            if st is not None and service_name in (st.text or ""):
                 scp = service.find("controlURL")
                 if scp is not None and scp.text:
                     return scp.text

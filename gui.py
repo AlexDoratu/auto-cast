@@ -34,6 +34,7 @@ import airplay_controller
 from config import SUPPORTED_EXTENSIONS, MIME_TYPES
 from capture import list_windows, get_monitors, ScreenStreamer
 from live_resolver import resolve_live_url
+from app_state import load_state, matches_device, redact_url, save_state, state_for_device
 
 
 # ── Color Palette ────────────────────────────────────────────────────────────
@@ -640,7 +641,10 @@ class AutoCastGUI(QMainWindow):
         self.selected_device: Device | None = None
         self.media_path: str | None = None
         self.media_server: MediaServer | None = None
+        self.playback_device: Device | None = None
         self.is_playing = False
+        self.resume_state = load_state()
+        self._resume_attempted = False
         self._state_lock = threading.RLock()
         self.bridge = SignalBridge()
 
@@ -704,6 +708,9 @@ class AutoCastGUI(QMainWindow):
         # Auto-refresh toggle
         self.auto_refresh_cb = QCheckBox("Auto")
         self.auto_refresh_cb.setToolTip("Auto-refresh device list")
+        self.auto_resume_cb = QCheckBox("Resume")
+        self.auto_resume_cb.setToolTip("Auto-play the last file or live URL when the same remembered device is found")
+        self.auto_resume_cb.setChecked(self.resume_state.auto_resume_enabled)
         self.refresh_interval = QSpinBox()
         self.refresh_interval.setRange(3, 60)
         self.refresh_interval.setValue(10)
@@ -711,6 +718,7 @@ class AutoCastGUI(QMainWindow):
         self.refresh_interval.setFixedWidth(64)
         self.refresh_interval.setToolTip("Refresh interval")
         header.addWidget(self.auto_refresh_cb)
+        header.addWidget(self.auto_resume_cb)
         header.addWidget(self.refresh_interval)
 
         parent.addLayout(header)
@@ -922,7 +930,7 @@ class AutoCastGUI(QMainWindow):
 
         # Bitrate slider
         s2, r2, self.bitrate_slider, self.bitrate_value = self._make_slider_row(
-            "BITRATE LIMIT", "Off", "5M", 0, 25, 5, " KB/s", unlimited_label="Unlimited"
+            "VIDEO BITRATE", "Auto", "5M", 0, 25, 5, "", unlimited_label="Auto"
         )
         layout.addWidget(s2)
         layout.addLayout(r2)
@@ -1045,6 +1053,7 @@ class AutoCastGUI(QMainWindow):
         self.play_btn.clicked.connect(self._on_play)
         self.stop_btn.clicked.connect(self._on_stop)
         self.volume_slider.valueChanged.connect(self._on_volume_change)
+        self.auto_resume_cb.toggled.connect(self._on_auto_resume_toggled)
 
         # Window cast
         self.refresh_windows_btn.clicked.connect(self._refresh_windows)
@@ -1162,6 +1171,9 @@ class AutoCastGUI(QMainWindow):
             if prev_ip and d.ip == prev_ip:
                 self.device_table.selectRow(i)
                 self.selected_device = d
+            elif not self.selected_device and matches_device(self.resume_state, d):
+                self.device_table.selectRow(i)
+                self.selected_device = d
 
         self.device_count.setText(f"{len(devices)} device(s) found")
         self._fade_table_in()
@@ -1176,12 +1188,56 @@ class AutoCastGUI(QMainWindow):
             next_sec = self.refresh_interval.value()
             self.status_label.setText(f"Auto #{self.scan_count}: {len(devices)} device(s) — next in {next_sec}s")
 
+        if self.selected_device and matches_device(self.resume_state, self.selected_device):
+            self._auto_resume_if_ready()
+
     def _on_device_select(self):
         rows = self.device_table.selectionModel().selectedRows()
         if rows:
             idx = rows[0].row()
             if idx < len(self.devices):
                 self.selected_device = self.devices[idx]
+                self.status_label.setText(f"Selected {self.selected_device.name}; volume changes are sent live when supported")
+
+    def _on_auto_resume_toggled(self, enabled: bool):
+        with self._state_lock:
+            self.resume_state = self.resume_state.__class__(**{**self.resume_state.__dict__, "auto_resume_enabled": enabled})
+            state = self.resume_state
+        save_state(state)
+        if enabled:
+            self._resume_attempted = False
+            if self.selected_device and matches_device(self.resume_state, self.selected_device):
+                self._auto_resume_if_ready()
+
+    def _remember_playback(self, device: Device, source_type: str, auto_resume_enabled: bool, **values):
+        state = state_for_device(device, source_type, **values)
+        state = state.__class__(**{**state.__dict__, "auto_resume_enabled": auto_resume_enabled})
+        with self._state_lock:
+            self.resume_state = state
+        save_state(state)
+
+    def _auto_resume_if_ready(self):
+        if self._resume_attempted or self.is_playing or not self.resume_state.auto_resume_enabled:
+            return
+        self._resume_attempted = True
+        if self.resume_state.source_type == "media" and self.resume_state.media_path:
+            path = Path(self.resume_state.media_path)
+            if not path.exists():
+                self.status_label.setText(f"Remembered file missing: {path.name}")
+                return
+            self.media_path = str(path)
+            self.tabs.setCurrentIndex(0)
+            self.media_path_label.setText(path.name)
+            self.media_path_label.setToolTip(str(path))
+            self.status_label.setText(f"Auto-resuming {path.name} on {self.selected_device.name}")
+            self._on_play()
+        elif self.resume_state.source_type == "live" and self.resume_state.live_url:
+            self.tabs.setCurrentIndex(1)
+            self.live_url_input.setText(self.resume_state.live_url)
+            self.status_label.setText(f"Auto-resuming live URL on {self.selected_device.name}")
+            self._on_play_live_url()
+        elif self.resume_state.source_type in {"window", "screen"}:
+            self.status_label.setText("Remembered capture source found; choose the window/screen again to cast")
 
     # ── Media File ─────────────────────────────────────────────────────────────
 
@@ -1230,6 +1286,7 @@ class AutoCastGUI(QMainWindow):
 
         device = self.selected_device
         media_path = self.media_path
+        auto_resume_enabled = self.auto_resume_cb.isChecked()
         ext = Path(media_path).suffix.lower()
         content_type = MIME_TYPES.get(ext, "application/octet-stream")
 
@@ -1244,10 +1301,14 @@ class AutoCastGUI(QMainWindow):
                     with self._state_lock:
                         self.media_server = server
                     loop.run_until_complete(dlna_controller.play(device, url, content_type))
+                    self._set_playback_device(device)
+                    self._remember_playback(device, "media", auto_resume_enabled, media_path=media_path)
                     self.bridge.status_update.emit(f"Playing on {device.name}")
                 elif device.device_type == DeviceType.AIRPLAY:
                     try:
                         loop.run_until_complete(airplay_controller.play(device, media_path))
+                        self._set_playback_device(device)
+                        self._remember_playback(device, "media", auto_resume_enabled, media_path=media_path)
                         self.bridge.status_update.emit(f"Playing on {device.name}")
                     except Exception:
                         dlna_device = loop.run_until_complete(dlna_controller.discover_dlna(device.ip))
@@ -1260,6 +1321,8 @@ class AutoCastGUI(QMainWindow):
                         with self._state_lock:
                             self.media_server = server
                         loop.run_until_complete(dlna_controller.play(dlna_device, url, content_type))
+                        self._set_playback_device(dlna_device)
+                        self._remember_playback(device, "media", auto_resume_enabled, media_path=media_path)
                         self.bridge.status_update.emit(f"Playing on {device.name} (via DLNA)")
                 else:
                     self.bridge.error_occurred.emit(f"Unsupported: {device.device_type}")
@@ -1282,24 +1345,31 @@ class AutoCastGUI(QMainWindow):
         self.status_label.setText("Resolving live stream...")
         self.play_btn.setEnabled(False)
         device = self.selected_device
+        auto_resume_enabled = self.auto_resume_cb.isChecked()
 
         def do_play_live():
             loop = asyncio.new_event_loop()
             try:
                 stream_url, content_type = resolve_live_url(live_url)
-                if device.device_type == DeviceType.DLNA:
-                    server = MediaServer()
-                    server.start_background(target_ip=device.ip)
-                    transcoded_url = server.register_live_stream(stream_url)
-                    with self._state_lock:
-                        self.media_server = server
-                    loop.run_until_complete(dlna_controller.play(device, transcoded_url, "video/mp2t"))
-                    self.bridge.status_update.emit(f"Playing transcoded live stream on {device.name}")
-                elif device.device_type == DeviceType.AIRPLAY:
-                    loop.run_until_complete(airplay_controller.play(device, stream_url))
-                    self.bridge.status_update.emit(f"Playing live stream on {device.name}")
-                else:
+                target_device = device
+                if device.device_type == DeviceType.AIRPLAY:
+                    dlna_device = loop.run_until_complete(dlna_controller.discover_dlna(device.ip))
+                    if not dlna_device:
+                        raise RuntimeError(f"No DLNA service found on {device.ip} for live casting")
+                    target_device = dlna_device
+                elif device.device_type != DeviceType.DLNA:
                     self.bridge.error_occurred.emit(f"Unsupported: {device.device_type}")
+                    return
+
+                server = MediaServer()
+                server.start_background(target_ip=target_device.ip)
+                transcoded_url = server.register_live_stream(stream_url, video_bitrate=self._video_bitrate())
+                with self._state_lock:
+                    self.media_server = server
+                loop.run_until_complete(dlna_controller.play(target_device, transcoded_url, "video/mp2t"))
+                self._set_playback_device(target_device)
+                self._remember_playback(device, "live", auto_resume_enabled, live_url=redact_url(live_url))
+                self.bridge.status_update.emit(f"Playing transcoded live stream on {device.name}")
             except Exception as e:
                 self.bridge.error_occurred.emit(str(e))
             finally:
@@ -1312,9 +1382,11 @@ class AutoCastGUI(QMainWindow):
 
     def _start_stream(self, source_type: str, source_id, device: Device, label: str):
         fps = self.fps_slider.value()
-        bitrate = self.bitrate_slider.value() * 200 if self.bitrate_slider.value() > 0 else 0
+        video_kbps = self._video_bitrate_kbps()
+        auto_resume_enabled = self.auto_resume_cb.isChecked()
         self.streamer.fps = fps
-        self.streamer.bitrate_limit = bitrate
+        self.streamer.bitrate_limit = video_kbps // 8 if video_kbps else 0
+        self.is_playing = True
         self.is_streaming = True
 
         def do_cast():
@@ -1357,14 +1429,20 @@ class AutoCastGUI(QMainWindow):
                     self.media_server = server
                 stream_url = f"http://{server._local_ip}:{server._actual_port}/stream"
 
-                transcoded_url = server.register_live_stream(stream_url, input_format="mjpeg")
+                transcoded_url = server.register_live_stream(stream_url, input_format="mjpeg", video_bitrate=self._video_bitrate())
                 if device.device_type == DeviceType.DLNA:
                     loop.run_until_complete(dlna_controller.play(device, transcoded_url, "video/mp2t"))
+                    self._set_playback_device(device)
                 elif device.device_type == DeviceType.AIRPLAY:
                     dlna_device = loop.run_until_complete(dlna_controller.discover_dlna(device.ip))
-                    if dlna_device:
-                        loop.run_until_complete(dlna_controller.play(dlna_device, transcoded_url, "video/mp2t"))
+                    if not dlna_device:
+                        raise RuntimeError(f"No DLNA service found on {device.ip} for capture casting")
+                    loop.run_until_complete(dlna_controller.play(dlna_device, transcoded_url, "video/mp2t"))
+                    self._set_playback_device(dlna_device)
+                else:
+                    raise RuntimeError(f"Unsupported: {device.device_type}")
 
+                self._remember_playback(device, source_type, auto_resume_enabled, capture_label=label)
                 self.bridge.status_update.emit(f"Casting {label} to {device.name}")
             except Exception as e:
                 self.bridge.error_occurred.emit(str(e))
@@ -1430,16 +1508,15 @@ class AutoCastGUI(QMainWindow):
         monitor = self.monitors_list[idx]
         self.cast_screen_btn.setEnabled(False)
         self.status_label.setText(f"Casting {monitor['name']}...")
-        self._start_stream("monitor", monitor["index"], self.selected_device, monitor["name"])
+        self._start_stream("screen", monitor["index"], self.selected_device, monitor["name"])
 
     # ── Stop & Volume ─────────────────────────────────────────────────────────
 
     def _on_stop(self):
         self._animate_button_click(self.stop_btn)
-        if not self.selected_device:
+        device = self._get_playback_device()
+        if not device:
             return
-
-        device = self.selected_device
         self.status_label.setText("Stopping...")
 
         if self.is_streaming:
@@ -1453,12 +1530,12 @@ class AutoCastGUI(QMainWindow):
             try:
                 if device.device_type == DeviceType.DLNA:
                     loop.run_until_complete(dlna_controller.stop(device))
-                    self._stop_local_services(loop)
                 elif device.device_type == DeviceType.AIRPLAY:
                     loop.run_until_complete(airplay_controller.stop(device))
-                    self._stop_local_services(loop)
+                self._stop_local_services(loop)
                 self.bridge.status_update.emit("Stopped")
                 self.is_playing = False
+                self.is_streaming = False
             except Exception as e:
                 self.bridge.error_occurred.emit(str(e))
             finally:
@@ -1466,10 +1543,19 @@ class AutoCastGUI(QMainWindow):
 
         threading.Thread(target=do_stop, daemon=True).start()
 
+    def _set_playback_device(self, device: Device | None):
+        with self._state_lock:
+            self.playback_device = device
+
+    def _get_playback_device(self) -> Device | None:
+        with self._state_lock:
+            return self.playback_device or self.selected_device
+
     def _stop_local_services(self, loop: asyncio.AbstractEventLoop | None = None):
         with self._state_lock:
             server = self.media_server
             self.media_server = None
+            self.playback_device = None
         if not server:
             return
         server.stop_background()
@@ -1482,9 +1568,11 @@ class AutoCastGUI(QMainWindow):
 
     def _on_volume_change(self, value: int):
         self.volume_value.setText(f"{value}%")
-        if not self.selected_device or not self.is_playing:
+        if not self.is_playing:
             return
-        device = self.selected_device
+        device = self._get_playback_device()
+        if not device:
+            return
 
         def do_volume():
             try:
@@ -1502,13 +1590,28 @@ class AutoCastGUI(QMainWindow):
         threading.Thread(target=do_volume, daemon=True).start()
 
     def _on_bitrate_change(self, value: int):
-        if value == 0:
-            kbps = 0
-            self.bitrate_value.setText("Unlimited")
+        kbps = self._video_bitrate_kbps()
+        if kbps == 0:
+            self.bitrate_value.setText("Auto")
         else:
-            kbps = value * 200
-            self.bitrate_value.setText(f"{kbps} KB/s")
-        self.streamer.bitrate_limit = kbps
+            self.bitrate_value.setText(self._format_video_bitrate(kbps))
+        self.streamer.bitrate_limit = kbps // 8 if kbps else 0
+        if self.is_playing:
+            self.status_label.setText("Bitrate changes apply on the next play/cast")
+
+    def _video_bitrate(self) -> str:
+        kbps = self._video_bitrate_kbps()
+        if kbps == 0:
+            return "3500k"
+        return f"{kbps}k"
+
+    def _video_bitrate_kbps(self) -> int:
+        return self.bitrate_slider.value() * 200
+
+    def _format_video_bitrate(self, kbps: int) -> str:
+        if kbps >= 1000 and kbps % 1000 == 0:
+            return f"{kbps // 1000} Mbps"
+        return f"{kbps} Kbps"
 
     # ── Status ────────────────────────────────────────────────────────────────
 
@@ -1517,6 +1620,8 @@ class AutoCastGUI(QMainWindow):
 
     def _on_error(self, msg: str):
         self.status_label.setText(f"Error: {msg}")
+        self.is_playing = False
+        self.is_streaming = False
         self.play_btn.setEnabled(True)
         self.cast_window_btn.setEnabled(True)
         self.cast_screen_btn.setEnabled(True)

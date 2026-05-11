@@ -11,12 +11,16 @@ from aiohttp import web
 logger = logging.getLogger(__name__)
 
 TS_CONTENT_TYPE = "video/mp2t"
+DEFAULT_VIDEO_BITRATE = "3500k"
+DEFAULT_BUFFER_SIZE = "7000k"
+DEFAULT_GOP_SIZE = "60"
 
 
 @dataclass
 class FFmpegTranscoder:
     input_url: str
     input_format: str = "url"
+    video_bitrate: str = DEFAULT_VIDEO_BITRATE
     process: subprocess.Popen | None = field(default=None, init=False)
 
     def start(self):
@@ -27,7 +31,7 @@ class FFmpegTranscoder:
             raise RuntimeError("FFmpeg not found. Install FFmpeg and make sure ffmpeg is in PATH.")
 
         self.process = subprocess.Popen(
-            build_ffmpeg_command(executable, self.input_url, self.input_format),
+            build_ffmpeg_command(executable, self.input_url, self.input_format, self.video_bitrate),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
@@ -58,7 +62,12 @@ class FFmpegTranscoder:
             process.wait(timeout=3)
 
 
-def build_ffmpeg_command(executable: str, input_url: str, input_format: str = "url") -> list[str]:
+def build_ffmpeg_command(
+    executable: str,
+    input_url: str,
+    input_format: str = "url",
+    video_bitrate: str = DEFAULT_VIDEO_BITRATE,
+) -> list[str]:
     input_options = _input_options(input_format)
     return [
         executable,
@@ -71,12 +80,24 @@ def build_ffmpeg_command(executable: str, input_url: str, input_format: str = "u
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-tune", "zerolatency",
+        "-b:v", video_bitrate,
+        "-maxrate", video_bitrate,
+        "-bufsize", _buffer_size(video_bitrate),
+        "-g", DEFAULT_GOP_SIZE,
+        "-keyint_min", DEFAULT_GOP_SIZE,
+        "-sc_threshold", "0",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-b:a", "128k",
         "-f", "mpegts",
         "pipe:1",
     ]
+
+
+def _buffer_size(video_bitrate: str) -> str:
+    if video_bitrate.endswith("k") and video_bitrate[:-1].isdigit():
+        return f"{int(video_bitrate[:-1]) * 2}k"
+    return DEFAULT_BUFFER_SIZE
 
 
 def _input_options(input_format: str) -> list[str]:
