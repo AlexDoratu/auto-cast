@@ -1,8 +1,9 @@
 """DLNA/UPnP renderer control via SOAP."""
 
+import html
 import logging
 import xml.etree.ElementTree as ET
-from urllib.parse import urljoin
+from urllib.parse import unquote, urlparse
 
 import aiohttp
 
@@ -114,7 +115,7 @@ async def pause(device: Device):
 async def set_volume(device: Device, volume: int):
     """Set volume (0-100)."""
     control_url = _get_rendering_control_url(device)
-    await _soap_action(
+    result = await _soap_action(
         device, control_url, RENDERINGCONTROL_NS, "SetVolume",
         {
             "InstanceID": "0",
@@ -122,6 +123,8 @@ async def set_volume(device: Device, volume: int):
             "DesiredVolume": str(max(0, min(100, volume))),
         },
     )
+    if result is None:
+        raise RuntimeError(f"Failed to set volume on {device.name}")
     logger.info(f"Volume set to {volume} on {device.name}")
 
 
@@ -158,7 +161,37 @@ def _get_rendering_control_url(device: Device) -> str:
 
 def _build_didl_lite(media_url: str, content_type: str) -> str:
     """Build DIDL-Lite metadata for SetAVTransportURI."""
-    return ""
+    escaped_url = html.escape(media_url, quote=True)
+    escaped_type = html.escape(content_type, quote=True)
+    title = html.escape(_media_title(media_url), quote=False)
+    upnp_class = _upnp_class(content_type)
+    protocol_info = f"http-get:*:{escaped_type}:*"
+
+    return (
+        '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/" '
+        'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
+        '<item id="0" parentID="0" restricted="1">'
+        f'<dc:title>{title}</dc:title>'
+        f'<upnp:class>{upnp_class}</upnp:class>'
+        f'<res protocolInfo="{protocol_info}">{escaped_url}</res>'
+        '</item>'
+        '</DIDL-Lite>'
+    )
+
+
+def _media_title(media_url: str) -> str:
+    path = urlparse(media_url).path
+    name = unquote(path.rsplit("/", 1)[-1])
+    return name or "Auto-Cast Stream"
+
+
+def _upnp_class(content_type: str) -> str:
+    if content_type.startswith("audio/"):
+        return "object.item.audioItem.musicTrack"
+    if content_type.startswith("image/"):
+        return "object.item.imageItem.photo"
+    return "object.item.videoItem"
 
 
 async def _soap_action(
@@ -170,7 +203,7 @@ async def _soap_action(
 ) -> dict | None:
     """Send a SOAP action request to the renderer."""
     body_parts = "".join(
-        f"<{k}>{v}</{k}>" for k, v in params.items()
+        f"<{k}>{html.escape(str(v), quote=False)}</{k}>" for k, v in params.items()
     )
     envelope = (
         '<?xml version="1.0" encoding="utf-8"?>'

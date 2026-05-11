@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QFileDialog, QTableWidget, QTableWidgetItem,
     QHeaderView, QSlider, QFrame, QMessageBox,
     QCheckBox, QSpinBox, QComboBox, QTabWidget, QListWidget, QListWidgetItem,
-    QGraphicsOpacityEffect,
+    QGraphicsOpacityEffect, QLineEdit,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, QSequentialAnimationGroup
 from PySide6.QtGui import QColor, QFont, QShortcut, QKeySequence, QIcon
@@ -33,6 +33,7 @@ import dlna_controller
 import airplay_controller
 from config import SUPPORTED_EXTENSIONS, MIME_TYPES
 from capture import list_windows, get_monitors, ScreenStreamer
+from live_resolver import resolve_live_url
 
 
 # ── Color Palette ────────────────────────────────────────────────────────────
@@ -530,6 +531,7 @@ class SignalBridge(QObject):
     devices_found = Signal(list)
     status_update = Signal(str)
     error_occurred = Signal(str)
+    playback_finished = Signal()
 
 
 # ── Animation Helpers ─────────────────────────────────────────────────────────
@@ -639,6 +641,7 @@ class AutoCastGUI(QMainWindow):
         self.media_path: str | None = None
         self.media_server: MediaServer | None = None
         self.is_playing = False
+        self._state_lock = threading.RLock()
         self.bridge = SignalBridge()
 
         # Screen capture
@@ -765,6 +768,7 @@ class AutoCastGUI(QMainWindow):
 
         self.tabs = AnimatedTabWidget()
         self.tabs.addTab(self._build_media_tab(), "Media File")
+        self.tabs.addTab(self._build_live_tab(), "Live URL")
         self.tabs.addTab(self._build_window_tab(), "Window Cast")
         self.tabs.addTab(self._build_screen_tab(), "Screen Cast")
         layout.addWidget(self.tabs)
@@ -832,6 +836,29 @@ class AutoCastGUI(QMainWindow):
         self.browse_btn = QPushButton("  Browse...")
         self.browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         layout.addWidget(self.browse_btn)
+        layout.addStretch()
+        return tab
+
+    def _build_live_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        label = QLabel("BILIBILI / LIVE URL")
+        label.setObjectName("sectionTitle")
+        layout.addWidget(label)
+
+        self.live_url_input = QLineEdit()
+        self.live_url_input.setPlaceholderText("Paste Bilibili live URL, e.g. https://live.bilibili.com/...")
+        self.live_url_input.setClearButtonEnabled(True)
+        self.live_url_input.setMinimumHeight(40)
+        layout.addWidget(self.live_url_input)
+
+        hint = QLabel("The app resolves the real stream in the background and pushes it to the selected TV.")
+        hint.setObjectName("subtitle")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
         layout.addStretch()
         return tab
 
@@ -1034,6 +1061,7 @@ class AutoCastGUI(QMainWindow):
         self.bridge.devices_found.connect(self._on_devices_found)
         self.bridge.status_update.connect(self._on_status_update)
         self.bridge.error_occurred.connect(self._on_error)
+        self.bridge.playback_finished.connect(self._on_playback_finished)
 
         # Keyboard shortcuts
         QShortcut(QKeySequence("Ctrl+O"), self, self._on_browse)
@@ -1068,15 +1096,17 @@ class AutoCastGUI(QMainWindow):
         self.status_label.setText("Scanning...")
 
         def do_scan():
+            loop = asyncio.new_event_loop()
             try:
                 logger.info("Auto-scan starting...")
-                loop = asyncio.new_event_loop()
                 devices = loop.run_until_complete(scan_all(timeout=4.0))
                 logger.info(f"Auto-scan complete: {len(devices)} device(s)")
                 self.bridge.devices_found.emit(devices)
             except Exception as e:
                 logger.exception("Auto-scan failed")
                 self.bridge.error_occurred.emit(str(e))
+            finally:
+                loop.close()
 
         threading.Thread(target=do_scan, daemon=True).start()
 
@@ -1087,15 +1117,17 @@ class AutoCastGUI(QMainWindow):
         self.status_label.setText("Scanning for devices...")
 
         def do_scan():
+            loop = asyncio.new_event_loop()
             try:
                 logger.info("Starting device scan...")
-                loop = asyncio.new_event_loop()
                 devices = loop.run_until_complete(scan_all(timeout=5.0))
                 logger.info(f"Scan complete: {len(devices)} device(s) found")
                 self.bridge.devices_found.emit(devices)
             except Exception as e:
                 logger.exception("Scan failed")
                 self.bridge.error_occurred.emit(str(e))
+            finally:
+                loop.close()
 
         threading.Thread(target=do_scan, daemon=True).start()
 
@@ -1184,10 +1216,14 @@ class AutoCastGUI(QMainWindow):
         if not self.selected_device:
             QMessageBox.warning(self, "Warning", "Please select a device first.")
             return
+        if tab_text == "Live URL":
+            self._on_play_live_url()
+            return
         if not self.media_path:
             QMessageBox.warning(self, "Warning", "Please select a media file first.")
             return
 
+        self._stop_local_services()
         self.is_playing = True
         self.status_label.setText(f"Playing on {self.selected_device.name}...")
         self.play_btn.setEnabled(False)
@@ -1198,18 +1234,18 @@ class AutoCastGUI(QMainWindow):
         content_type = MIME_TYPES.get(ext, "application/octet-stream")
 
         def do_play():
+            loop = asyncio.new_event_loop()
             try:
                 if device.device_type == DeviceType.DLNA:
-                    loop = asyncio.new_event_loop()
                     server = MediaServer()
-                    loop.run_until_complete(server.start(target_ip=device.ip))
+                    server.start_background(target_ip=device.ip)
                     server.register_file(media_path)
                     url = server.get_url(media_path)
-                    self.media_server = server
+                    with self._state_lock:
+                        self.media_server = server
                     loop.run_until_complete(dlna_controller.play(device, url, content_type))
                     self.bridge.status_update.emit(f"Playing on {device.name}")
                 elif device.device_type == DeviceType.AIRPLAY:
-                    loop = asyncio.new_event_loop()
                     try:
                         loop.run_until_complete(airplay_controller.play(device, media_path))
                         self.bridge.status_update.emit(f"Playing on {device.name}")
@@ -1218,10 +1254,11 @@ class AutoCastGUI(QMainWindow):
                         if not dlna_device:
                             raise RuntimeError(f"No DLNA service on {device.ip}")
                         server = MediaServer()
-                        loop.run_until_complete(server.start(target_ip=dlna_device.ip))
+                        server.start_background(target_ip=dlna_device.ip)
                         server.register_file(media_path)
                         url = server.get_url(media_path)
-                        self.media_server = server
+                        with self._state_lock:
+                            self.media_server = server
                         loop.run_until_complete(dlna_controller.play(dlna_device, url, content_type))
                         self.bridge.status_update.emit(f"Playing on {device.name} (via DLNA)")
                 else:
@@ -1229,9 +1266,47 @@ class AutoCastGUI(QMainWindow):
             except Exception as e:
                 self.bridge.error_occurred.emit(str(e))
             finally:
-                self.play_btn.setEnabled(True)
+                self.bridge.playback_finished.emit()
+                loop.close()
 
         threading.Thread(target=do_play, daemon=True).start()
+
+    def _on_play_live_url(self):
+        live_url = self.live_url_input.text().strip()
+        if not live_url:
+            QMessageBox.warning(self, "Warning", "Please paste a live URL first.")
+            return
+
+        self._stop_local_services()
+        self.is_playing = True
+        self.status_label.setText("Resolving live stream...")
+        self.play_btn.setEnabled(False)
+        device = self.selected_device
+
+        def do_play_live():
+            loop = asyncio.new_event_loop()
+            try:
+                stream_url, content_type = resolve_live_url(live_url)
+                if device.device_type == DeviceType.DLNA:
+                    server = MediaServer()
+                    server.start_background(target_ip=device.ip)
+                    transcoded_url = server.register_live_stream(stream_url)
+                    with self._state_lock:
+                        self.media_server = server
+                    loop.run_until_complete(dlna_controller.play(device, transcoded_url, "video/mp2t"))
+                    self.bridge.status_update.emit(f"Playing transcoded live stream on {device.name}")
+                elif device.device_type == DeviceType.AIRPLAY:
+                    loop.run_until_complete(airplay_controller.play(device, stream_url))
+                    self.bridge.status_update.emit(f"Playing live stream on {device.name}")
+                else:
+                    self.bridge.error_occurred.emit(f"Unsupported: {device.device_type}")
+            except Exception as e:
+                self.bridge.error_occurred.emit(str(e))
+            finally:
+                self.bridge.playback_finished.emit()
+                loop.close()
+
+        threading.Thread(target=do_play_live, daemon=True).start()
 
     # ── Streaming (shared) ────────────────────────────────────────────────────
 
@@ -1243,13 +1318,13 @@ class AutoCastGUI(QMainWindow):
         self.is_streaming = True
 
         def do_cast():
+            loop = asyncio.new_event_loop()
             try:
                 if source_type == "window":
                     self.streamer.start_window(source_id)
                 else:
                     self.streamer.start_monitor(source_id)
 
-                loop = asyncio.new_event_loop()
                 server = MediaServer()
                 streamer_ref = self.streamer
 
@@ -1277,20 +1352,25 @@ class AutoCastGUI(QMainWindow):
                     return response
 
                 server._app.router.add_get("/stream", stream_handle)
-                loop.run_until_complete(server.start(target_ip=device.ip))
+                server.start_background(target_ip=device.ip)
+                with self._state_lock:
+                    self.media_server = server
                 stream_url = f"http://{server._local_ip}:{server._actual_port}/stream"
 
+                transcoded_url = server.register_live_stream(stream_url, input_format="mjpeg")
                 if device.device_type == DeviceType.DLNA:
-                    loop.run_until_complete(dlna_controller.play(device, stream_url, "image/jpeg"))
+                    loop.run_until_complete(dlna_controller.play(device, transcoded_url, "video/mp2t"))
                 elif device.device_type == DeviceType.AIRPLAY:
                     dlna_device = loop.run_until_complete(dlna_controller.discover_dlna(device.ip))
                     if dlna_device:
-                        loop.run_until_complete(dlna_controller.play(dlna_device, stream_url, "image/jpeg"))
+                        loop.run_until_complete(dlna_controller.play(dlna_device, transcoded_url, "video/mp2t"))
 
                 self.bridge.status_update.emit(f"Casting {label} to {device.name}")
             except Exception as e:
                 self.bridge.error_occurred.emit(str(e))
                 self.is_streaming = False
+            finally:
+                loop.close()
 
         threading.Thread(target=do_cast, daemon=True).start()
 
@@ -1369,21 +1449,36 @@ class AutoCastGUI(QMainWindow):
             self.cast_screen_btn.setEnabled(True)
 
         def do_stop():
+            loop = asyncio.new_event_loop()
             try:
-                loop = asyncio.new_event_loop()
                 if device.device_type == DeviceType.DLNA:
                     loop.run_until_complete(dlna_controller.stop(device))
-                    if self.media_server:
-                        loop.run_until_complete(self.media_server.stop())
-                        self.media_server = None
+                    self._stop_local_services(loop)
                 elif device.device_type == DeviceType.AIRPLAY:
                     loop.run_until_complete(airplay_controller.stop(device))
+                    self._stop_local_services(loop)
                 self.bridge.status_update.emit("Stopped")
                 self.is_playing = False
             except Exception as e:
                 self.bridge.error_occurred.emit(str(e))
+            finally:
+                loop.close()
 
         threading.Thread(target=do_stop, daemon=True).start()
+
+    def _stop_local_services(self, loop: asyncio.AbstractEventLoop | None = None):
+        with self._state_lock:
+            server = self.media_server
+            self.media_server = None
+        if not server:
+            return
+        server.stop_background()
+
+    def closeEvent(self, event):
+        self.streamer.stop()
+        self.is_streaming = False
+        self._stop_local_services()
+        event.accept()
 
     def _on_volume_change(self, value: int):
         self.volume_value.setText(f"{value}%")
@@ -1398,8 +1493,11 @@ class AutoCastGUI(QMainWindow):
                     loop.run_until_complete(dlna_controller.set_volume(device, value))
                 elif device.device_type == DeviceType.AIRPLAY:
                     loop.run_until_complete(airplay_controller.set_volume(device, value))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Volume update failed: {e}")
+                self.bridge.status_update.emit(f"Volume update failed: {e}")
+            finally:
+                loop.close()
 
         threading.Thread(target=do_volume, daemon=True).start()
 
@@ -1422,6 +1520,9 @@ class AutoCastGUI(QMainWindow):
         self.play_btn.setEnabled(True)
         self.cast_window_btn.setEnabled(True)
         self.cast_screen_btn.setEnabled(True)
+
+    def _on_playback_finished(self):
+        self.play_btn.setEnabled(True)
 
 
 # ── Entry Point ───────────────────────────────────────────────────────────────

@@ -171,12 +171,35 @@ class TestDIDLLite:
 
 # --- Media Server Tests ---
 
+class TestFFmpegTranscoder:
+    def test_build_ffmpeg_command_outputs_mpegts(self):
+        from ffmpeg_transcoder import build_ffmpeg_command
+        command = build_ffmpeg_command("ffmpeg", "https://cdn.example.com/live.m3u8")
+        assert command[0] == "ffmpeg"
+        assert "https://cdn.example.com/live.m3u8" in command
+        assert "mpegts" in command
+        assert command[-1] == "pipe:1"
+
+    def test_build_ffmpeg_command_supports_mjpeg_input(self):
+        from ffmpeg_transcoder import build_ffmpeg_command
+        command = build_ffmpeg_command("ffmpeg", "http://127.0.0.1/stream", "mjpeg")
+        assert command[command.index("-f") + 1] == "mjpeg"
+        assert "-reconnect" not in command
+
+    @patch("ffmpeg_transcoder.shutil.which", return_value=None)
+    def test_ffmpeg_transcoder_errors_when_ffmpeg_missing(self, _which):
+        from ffmpeg_transcoder import FFmpegTranscoder
+        with pytest.raises(RuntimeError):
+            FFmpegTranscoder("https://cdn.example.com/live.m3u8").start()
+
+
 class TestMediaServer:
     def test_register_file(self):
         from media_server import MediaServer
         server = MediaServer()
-        server.register_file("/path/to/video.mp4")
-        assert any("video.mp4" in f for f in server._registered_files)
+        file_id = server.register_file("/path/to/video.mp4")
+        assert file_id.endswith(".mp4")
+        assert server._registered_files[file_id].endswith("video.mp4")
 
     def test_register_files_dedup(self):
         from media_server import MediaServer
@@ -199,7 +222,18 @@ class TestMediaServer:
         url = server.get_url("/some/path/video.mp4")
         assert "192.168.1.1" in url
         assert "12345" in url
-        assert "video.mp4" in url
+        assert url.startswith("http://192.168.1.1:12345/media/")
+        assert url.endswith(".mp4")
+
+    def test_register_live_stream_url_format(self):
+        from media_server import MediaServer
+        server = MediaServer()
+        server._local_ip = "192.168.1.1"
+        server._actual_port = 12345
+        url = server.register_live_stream("https://cdn.example.com/live.m3u8")
+        assert url.startswith("http://192.168.1.1:12345/live/")
+        assert url.endswith(".ts")
+        assert len(server._live_streams) == 1
 
     def test_get_local_ip_returns_string(self):
         from media_server import MediaServer
@@ -210,17 +244,25 @@ class TestMediaServer:
     def test_resolve_path_found(self):
         from media_server import MediaServer
         server = MediaServer()
-        server._registered_files = ["/full/path/to/video.mp4"]
-        result = server._resolve_path("video.mp4")
+        file_id = server.register_file("/full/path/to/video.mp4")
+        result = server._resolve_path(file_id)
         assert result is not None
         assert str(result).endswith("video.mp4")
 
     def test_resolve_path_not_found(self):
         from media_server import MediaServer
         server = MediaServer()
-        server._registered_files = ["/full/path/to/video.mp4"]
+        server.register_file("/full/path/to/video.mp4")
         result = server._resolve_path("other.mp4")
         assert result is None
+
+    def test_register_file_avoids_basename_collisions(self):
+        from media_server import MediaServer
+        server = MediaServer()
+        first = server.register_file("/a/video.mp4")
+        second = server.register_file("/b/video.mp4")
+        assert first != second
+        assert len(server._registered_files) == 2
 
     def test_resolve_path_empty_registry(self):
         from media_server import MediaServer
@@ -384,6 +426,36 @@ class TestCLI:
 
 
 # --- DLNA Controller Helper Tests ---
+
+class TestLiveResolver:
+    def test_guess_content_type_hls(self):
+        from live_resolver import guess_content_type
+        assert guess_content_type("https://example.com/live.m3u8") == "application/vnd.apple.mpegurl"
+
+    def test_guess_content_type_flv(self):
+        from live_resolver import guess_content_type
+        assert guess_content_type("https://example.com/live.flv") == "video/x-flv"
+
+    @patch("live_resolver.shutil.which", return_value=None)
+    def test_resolve_live_url_errors_without_resolver(self, _which):
+        from live_resolver import resolve_live_url
+        with pytest.raises(RuntimeError):
+            resolve_live_url("https://live.bilibili.com/123")
+
+    @patch("live_resolver.shutil.which", side_effect=lambda name: "yt-dlp" if name == "yt-dlp" else None)
+    @patch("live_resolver.subprocess.run")
+    def test_resolve_live_url_uses_ytdlp(self, run_mock, _which):
+        from live_resolver import resolve_live_url
+        run_mock.return_value = MagicMock(returncode=0, stdout="https://cdn.example.com/live.m3u8\n")
+        url, content_type = resolve_live_url("https://live.bilibili.com/123")
+        assert url == "https://cdn.example.com/live.m3u8"
+        assert content_type == "application/vnd.apple.mpegurl"
+
+    def test_resolve_live_url_rejects_non_http_url(self):
+        from live_resolver import resolve_live_url
+        with pytest.raises(ValueError):
+            resolve_live_url("file:///tmp/video.mp4")
+
 
 class TestDLNAController:
     def test_get_control_url_with_path(self):
