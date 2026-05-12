@@ -1152,6 +1152,9 @@ class AutoCastGUI(QMainWindow):
             DeviceType.CHROMECAST: QColor(C.PINK),
         }
 
+        playback_ip = self.playback_device.ip if self.playback_device else None
+        has_playback_device = False
+
         for i, d in enumerate(devices):
             name_item = QTableWidgetItem(d.name)
             name_item.setToolTip(d.name)
@@ -1168,6 +1171,8 @@ class AutoCastGUI(QMainWindow):
             status_item.setForeground(QColor(C.SUCCESS))
             self.device_table.setItem(i, 3, status_item)
 
+            if playback_ip and d.ip == playback_ip:
+                has_playback_device = True
             if prev_ip and d.ip == prev_ip:
                 self.device_table.selectRow(i)
                 self.selected_device = d
@@ -1187,6 +1192,12 @@ class AutoCastGUI(QMainWindow):
             self.scan_count += 1
             next_sec = self.refresh_interval.value()
             self.status_label.setText(f"Auto #{self.scan_count}: {len(devices)} device(s) — next in {next_sec}s")
+
+        if self.is_playing and playback_ip and not has_playback_device:
+            self.is_playing = False
+            self.is_streaming = False
+            self._set_playback_device(None)
+            self._resume_attempted = False
 
         if self.selected_device and matches_device(self.resume_state, self.selected_device):
             self._auto_resume_if_ready()
@@ -1322,7 +1333,7 @@ class AutoCastGUI(QMainWindow):
                             self.media_server = server
                         loop.run_until_complete(dlna_controller.play(dlna_device, url, content_type))
                         self._set_playback_device(dlna_device)
-                        self._remember_playback(device, "media", auto_resume_enabled, media_path=media_path)
+                        self._remember_playback(dlna_device, "media", auto_resume_enabled, media_path=media_path)
                         self.bridge.status_update.emit(f"Playing on {device.name} (via DLNA)")
                 else:
                     self.bridge.error_occurred.emit(f"Unsupported: {device.device_type}")
@@ -1368,7 +1379,7 @@ class AutoCastGUI(QMainWindow):
                     self.media_server = server
                 loop.run_until_complete(dlna_controller.play(target_device, transcoded_url, "video/mp2t"))
                 self._set_playback_device(target_device)
-                self._remember_playback(device, "live", auto_resume_enabled, live_url=redact_url(live_url))
+                self._remember_playback(target_device, "live", auto_resume_enabled, live_url=redact_url(live_url))
                 self.bridge.status_update.emit(f"Playing transcoded live stream on {device.name}")
             except Exception as e:
                 self.bridge.error_occurred.emit(str(e))
@@ -1430,19 +1441,20 @@ class AutoCastGUI(QMainWindow):
                 stream_url = f"http://{server._local_ip}:{server._actual_port}/stream"
 
                 transcoded_url = server.register_live_stream(stream_url, input_format="mjpeg", video_bitrate=self._video_bitrate())
+                target_device = device
                 if device.device_type == DeviceType.DLNA:
                     loop.run_until_complete(dlna_controller.play(device, transcoded_url, "video/mp2t"))
-                    self._set_playback_device(device)
                 elif device.device_type == DeviceType.AIRPLAY:
                     dlna_device = loop.run_until_complete(dlna_controller.discover_dlna(device.ip))
                     if not dlna_device:
                         raise RuntimeError(f"No DLNA service found on {device.ip} for capture casting")
+                    target_device = dlna_device
                     loop.run_until_complete(dlna_controller.play(dlna_device, transcoded_url, "video/mp2t"))
-                    self._set_playback_device(dlna_device)
                 else:
                     raise RuntimeError(f"Unsupported: {device.device_type}")
 
-                self._remember_playback(device, source_type, auto_resume_enabled, capture_label=label)
+                self._set_playback_device(target_device)
+                self._remember_playback(target_device, source_type, auto_resume_enabled, capture_label=label)
                 self.bridge.status_update.emit(f"Casting {label} to {device.name}")
             except Exception as e:
                 self.bridge.error_occurred.emit(str(e))

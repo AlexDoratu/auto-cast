@@ -211,11 +211,11 @@ class TestResumeState:
         device = Device("TV", DeviceType.DLNA, "1.2.3.4", 5000)
         assert not matches_device(state, device)
 
-    def test_matches_device_rejects_uid_missing_on_device(self):
+    def test_matches_device_falls_back_to_name_ip_when_uid_missing_on_device(self):
         from app_state import ResumeState, matches_device
         state = ResumeState(device_name="TV", device_type="dlna", device_ip="1.2.3.4", device_uid="uuid:tv")
         device = Device("TV", DeviceType.DLNA, "1.2.3.4", 5000)
-        assert not matches_device(state, device)
+        assert matches_device(state, device)
 
     def test_redact_url_removes_query_tokens(self):
         from app_state import redact_url
@@ -234,10 +234,16 @@ class TestResumeState:
         path.write_text('{"live_url":"https://live.bilibili.com/440006?session_id=secret"}', encoding="utf-8")
         assert load_state(path).live_url == "https://live.bilibili.com/440006"
 
-    def test_matches_device_rejects_different_type(self):
+    def test_matches_device_allows_same_renderer_with_different_discovery_type(self):
         from app_state import ResumeState, matches_device
         state = ResumeState(device_name="TV", device_type="airplay", device_ip="1.2.3.4")
         device = Device("TV", DeviceType.DLNA, "1.2.3.4", 5000)
+        assert matches_device(state, device)
+
+    def test_matches_device_rejects_different_name_without_uid(self):
+        from app_state import ResumeState, matches_device
+        state = ResumeState(device_name="TV", device_type="airplay", device_ip="1.2.3.4")
+        device = Device("Other TV", DeviceType.DLNA, "1.2.3.4", 5000)
         assert not matches_device(state, device)
 
 

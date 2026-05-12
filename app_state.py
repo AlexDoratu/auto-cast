@@ -63,12 +63,11 @@ def state_for_device(device: Device, source_type: str, **values) -> ResumeState:
 
 
 def matches_device(state: ResumeState, device: Device) -> bool:
-    if not state.auto_resume_enabled or not state.device_ip or not state.device_type:
+    if not state.auto_resume_enabled or not state.device_ip:
         return False
-    same_device = state.device_type == device.device_type.value and state.device_ip == device.ip
-    if state.device_uid:
-        return same_device and bool(device.uid) and state.device_uid == device.uid
-    return same_device and bool(state.device_name) and state.device_name == device.name
+    if state.device_uid and device.uid:
+        return state.device_ip == device.ip and state.device_uid == device.uid
+    return state.device_ip == device.ip and bool(state.device_name) and state.device_name == device.name
 
 
 def redact_url(url: str) -> str:
