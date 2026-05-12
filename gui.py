@@ -4,6 +4,7 @@ import asyncio
 import logging
 import sys
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 # Log to file for debugging packaged exe
@@ -533,6 +534,9 @@ class SignalBridge(QObject):
     status_update = Signal(str)
     error_occurred = Signal(str)
     playback_finished = Signal()
+    start_playback_polling = Signal()
+    cleanup_requested = Signal()
+    next_queued_media = Signal()
 
 
 # ── Animation Helpers ─────────────────────────────────────────────────────────
@@ -639,13 +643,21 @@ class AutoCastGUI(QMainWindow):
         super().__init__()
         self.devices: list[Device] = []
         self.selected_device: Device | None = None
+        self.resume_state = load_state()
         self.media_path: str | None = None
+        self.media_queue: list[str] = list(self.resume_state.queue)
+        self.queue_index = min(self.resume_state.queue_index, max(len(self.media_queue) - 1, 0))
+        self.playback_poll_timer = QTimer()
+        self.playback_poll_timer.timeout.connect(self._poll_playback_status)
+        self.is_polling_playback = False
+        self.is_user_stopping = False
+        self._poll_lock = threading.Lock()
         self.media_server: MediaServer | None = None
         self.playback_device: Device | None = None
         self.is_scanning = False
         self.scan_generation = 0
         self.is_playing = False
-        self.resume_state = load_state()
+        self.playback_generation = 0
         self._resume_attempted = False
         self._state_lock = threading.RLock()
         self.bridge = SignalBridge()
@@ -846,6 +858,24 @@ class AutoCastGUI(QMainWindow):
         self.browse_btn = QPushButton("  Browse...")
         self.browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         layout.addWidget(self.browse_btn)
+
+        queue_row = QHBoxLayout()
+        queue_row.setSpacing(8)
+        self.add_queue_btn = QPushButton("Add Files")
+        self.add_queue_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.add_folder_btn = QPushButton("Add Folder")
+        self.add_folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clear_queue_btn = QPushButton("Clear")
+        self.clear_queue_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        queue_row.addWidget(self.add_queue_btn)
+        queue_row.addWidget(self.add_folder_btn)
+        queue_row.addWidget(self.clear_queue_btn)
+        layout.addLayout(queue_row)
+
+        self.queue_list = QListWidget()
+        self.queue_list.setMinimumHeight(150)
+        layout.addWidget(self.queue_list)
+        self._refresh_queue_list()
         layout.addStretch()
         return tab
 
@@ -1052,6 +1082,10 @@ class AutoCastGUI(QMainWindow):
 
         # Media
         self.browse_btn.clicked.connect(self._on_browse)
+        self.add_queue_btn.clicked.connect(self._on_add_queue_files)
+        self.add_folder_btn.clicked.connect(self._on_add_queue_folder)
+        self.clear_queue_btn.clicked.connect(self._on_clear_queue)
+        self.queue_list.currentRowChanged.connect(self._on_queue_select)
         self.play_btn.clicked.connect(self._on_play)
         self.stop_btn.clicked.connect(self._on_stop)
         self.volume_slider.valueChanged.connect(self._on_volume_change)
@@ -1073,6 +1107,9 @@ class AutoCastGUI(QMainWindow):
         self.bridge.status_update.connect(self._on_status_update)
         self.bridge.error_occurred.connect(self._on_error)
         self.bridge.playback_finished.connect(self._on_playback_finished)
+        self.bridge.start_playback_polling.connect(self._start_playback_polling)
+        self.bridge.cleanup_requested.connect(self._cleanup_local_playback)
+        self.bridge.next_queued_media.connect(self._play_next_queued_media)
 
         # Keyboard shortcuts
         QShortcut(QKeySequence("Ctrl+O"), self, self._on_browse)
@@ -1236,7 +1273,7 @@ class AutoCastGUI(QMainWindow):
 
     def _remember_playback(self, device: Device, source_type: str, auto_resume_enabled: bool, **values):
         state = state_for_device(device, source_type, **values)
-        state = state.__class__(**{**state.__dict__, "auto_resume_enabled": auto_resume_enabled})
+        state = replace(state, auto_resume_enabled=auto_resume_enabled)
         with self._state_lock:
             self.resume_state = state
         save_state(state)
@@ -1246,16 +1283,17 @@ class AutoCastGUI(QMainWindow):
             return
         self._resume_attempted = True
         if self.resume_state.source_type == "media" and self.resume_state.media_path:
-            path = Path(self.resume_state.media_path)
-            if not path.exists():
-                self.status_label.setText(f"Remembered file missing: {path.name}")
+            queue = self.resume_state.queue or [self.resume_state.media_path]
+            existing_queue = [path for path in queue if Path(path).exists()]
+            if not existing_queue:
+                self.status_label.setText("Remembered media files are missing")
                 return
-            self.media_path = str(path)
+            remembered_path = self.resume_state.media_path
+            index = existing_queue.index(remembered_path) if remembered_path in existing_queue else min(self.resume_state.queue_index, len(existing_queue) - 1)
+            self._set_media_queue(existing_queue, index)
             self.tabs.setCurrentIndex(0)
-            self.media_path_label.setText(path.name)
-            self.media_path_label.setToolTip(str(path))
-            self.status_label.setText(f"Auto-resuming {path.name} on {self.selected_device.name}")
-            self._on_play()
+            self.status_label.setText(f"Auto-resuming {Path(self.media_path).name} on {self.selected_device.name}")
+            self._play_media_at(index, self.resume_state.position)
         elif self.resume_state.source_type == "live" and self.resume_state.live_url:
             self.tabs.setCurrentIndex(1)
             self.live_url_input.setText(self.resume_state.live_url)
@@ -1274,16 +1312,79 @@ class AutoCastGUI(QMainWindow):
             f"Media Files ({ext_list});;All Files (*)"
         )
         if filepath:
-            self.media_path = filepath
-            name = Path(filepath).name
-            self.media_path_label.setObjectName("subtitle")
+            self._set_media_queue([filepath], 0)
+
+    def _on_add_queue_files(self):
+        ext_list = " ".join(f"*{ext}" for ext in sorted(SUPPORTED_EXTENSIONS))
+        filepaths, _ = QFileDialog.getOpenFileNames(
+            self, "Add Media Files", "",
+            f"Media Files ({ext_list});;All Files (*)"
+        )
+        if filepaths:
+            self._set_media_queue([*self.media_queue, *filepaths], self.queue_index)
+
+    def _on_add_queue_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Add Media Folder")
+        if not folder:
+            return
+        paths = [str(path) for path in sorted(Path(folder).iterdir()) if path.suffix.lower() in SUPPORTED_EXTENSIONS]
+        if not paths:
+            QMessageBox.information(self, "Info", "No supported media files found in this folder.")
+            return
+        self._set_media_queue([*self.media_queue, *paths], self.queue_index)
+
+    def _on_clear_queue(self):
+        self._set_media_queue([], 0)
+        with self._state_lock:
+            self.resume_state = replace(self.resume_state, queue=[], queue_index=0, media_path="", position="")
+            state = self.resume_state
+        save_state(state)
+        self.status_label.setText("Queue cleared")
+
+    def _on_queue_select(self, row: int):
+        if 0 <= row < len(self.media_queue):
+            self.queue_index = row
+            self.media_path = self.media_queue[row]
+            self._update_media_label(self.media_path)
+
+    def _set_media_queue(self, queue: list[str], index: int = 0):
+        self.media_queue = list(dict.fromkeys(queue))
+        self.queue_index = min(max(index, 0), max(len(self.media_queue) - 1, 0))
+        self.media_path = self.media_queue[self.queue_index] if self.media_queue else None
+        self._refresh_queue_list()
+        if self.media_path:
+            self._update_media_label(self.media_path)
+            self.status_label.setText(f"Queued {len(self.media_queue)} file(s)")
+        else:
+            self.media_path_label.setObjectName("emptyState")
             self.media_path_label.style().unpolish(self.media_path_label)
             self.media_path_label.style().polish(self.media_path_label)
-            metrics = self.media_path_label.fontMetrics()
-            elided = metrics.elidedText(name, Qt.TextElideMode.ElideMiddle, 280)
-            self.media_path_label.setText(elided)
-            self.media_path_label.setToolTip(filepath)
-            self.status_label.setText(f"Selected: {name}")
+            self.media_path_label.setText("No file selected")
+            self.media_path_label.setToolTip("")
+
+    def _refresh_queue_list(self):
+        if not hasattr(self, "queue_list"):
+            return
+        self.queue_list.blockSignals(True)
+        self.queue_list.clear()
+        for index, path in enumerate(self.media_queue):
+            prefix = "▶ " if index == self.queue_index else ""
+            item = QListWidgetItem(f"{prefix}{Path(path).name}")
+            item.setToolTip(path)
+            self.queue_list.addItem(item)
+        if self.media_queue:
+            self.queue_list.setCurrentRow(self.queue_index)
+        self.queue_list.blockSignals(False)
+
+    def _update_media_label(self, filepath: str):
+        name = Path(filepath).name
+        self.media_path_label.setObjectName("subtitle")
+        self.media_path_label.style().unpolish(self.media_path_label)
+        self.media_path_label.style().polish(self.media_path_label)
+        metrics = self.media_path_label.fontMetrics()
+        elided = metrics.elidedText(name, Qt.TextElideMode.ElideMiddle, 280)
+        self.media_path_label.setText(elided)
+        self.media_path_label.setToolTip(filepath)
 
     def _on_play(self):
         self._animate_button_click(self.play_btn)
@@ -1304,13 +1405,33 @@ class AutoCastGUI(QMainWindow):
             QMessageBox.warning(self, "Warning", "Please select a media file first.")
             return
 
+        self._play_media_at(self.queue_index)
+
+    def _play_media_at(self, index: int, resume_position: str = ""):
+        if not self.selected_device:
+            return
+        if self.media_queue:
+            if index < 0 or index >= len(self.media_queue):
+                return
+            self.queue_index = index
+            self.media_path = self.media_queue[index]
+        if not self.media_path:
+            return
+
+        self._refresh_queue_list()
+        self._update_media_label(self.media_path)
         self._stop_local_services()
+        self.playback_generation += 1
+        generation = self.playback_generation
+        self.is_user_stopping = False
         self.is_playing = True
         self.status_label.setText(f"Playing on {self.selected_device.name}...")
         self.play_btn.setEnabled(False)
 
         device = self.selected_device
         media_path = self.media_path
+        queue = list(self.media_queue) or [media_path]
+        queue_index = self.queue_index if self.media_queue else 0
         auto_resume_enabled = self.auto_resume_cb.isChecked()
         ext = Path(media_path).suffix.lower()
         content_type = MIME_TYPES.get(ext, "application/octet-stream")
@@ -1326,14 +1447,23 @@ class AutoCastGUI(QMainWindow):
                     with self._state_lock:
                         self.media_server = server
                     loop.run_until_complete(dlna_controller.play(device, url, content_type))
+                    if generation != self.playback_generation or self.is_user_stopping:
+                        loop.run_until_complete(dlna_controller.stop(device))
+                        return
+                    if resume_position:
+                        self._try_seek(loop, device, resume_position)
                     self._set_playback_device(device)
-                    self._remember_playback(device, "media", auto_resume_enabled, media_path=media_path)
+                    self._remember_playback(device, "media", auto_resume_enabled, media_path=media_path, queue=queue, queue_index=queue_index, position=resume_position)
                     self.bridge.status_update.emit(f"Playing on {device.name}")
+                    self.bridge.start_playback_polling.emit()
                 elif device.device_type == DeviceType.AIRPLAY:
                     try:
                         loop.run_until_complete(airplay_controller.play(device, media_path))
+                        if generation != self.playback_generation or self.is_user_stopping:
+                            loop.run_until_complete(airplay_controller.stop(device))
+                            return
                         self._set_playback_device(device)
-                        self._remember_playback(device, "media", auto_resume_enabled, media_path=media_path)
+                        self._remember_playback(device, "media", auto_resume_enabled, media_path=media_path, queue=queue, queue_index=queue_index, position="")
                         self.bridge.status_update.emit(f"Playing on {device.name}")
                     except Exception:
                         dlna_device = loop.run_until_complete(dlna_controller.discover_dlna(device.ip))
@@ -1346,13 +1476,19 @@ class AutoCastGUI(QMainWindow):
                         with self._state_lock:
                             self.media_server = server
                         loop.run_until_complete(dlna_controller.play(dlna_device, url, content_type))
+                        if generation != self.playback_generation or self.is_user_stopping:
+                            loop.run_until_complete(dlna_controller.stop(dlna_device))
+                            return
+                        if resume_position:
+                            self._try_seek(loop, dlna_device, resume_position)
                         self._set_playback_device(dlna_device)
-                        self._remember_playback(dlna_device, "media", auto_resume_enabled, media_path=media_path)
+                        self._remember_playback(dlna_device, "media", auto_resume_enabled, media_path=media_path, queue=queue, queue_index=queue_index, position=resume_position)
                         self.bridge.status_update.emit(f"Playing on {device.name} (via DLNA)")
+                        self.bridge.start_playback_polling.emit()
                 else:
                     self.bridge.error_occurred.emit(f"Unsupported: {device.device_type}")
             except Exception as e:
-                self._cleanup_local_playback()
+                self.bridge.cleanup_requested.emit()
                 self.bridge.error_occurred.emit(str(e))
             finally:
                 self.bridge.playback_finished.emit()
@@ -1397,7 +1533,7 @@ class AutoCastGUI(QMainWindow):
                 self._remember_playback(target_device, "live", auto_resume_enabled, live_url=redact_url(live_url))
                 self.bridge.status_update.emit(f"Playing transcoded live stream on {device.name}")
             except Exception as e:
-                self._cleanup_local_playback()
+                self.bridge.cleanup_requested.emit()
                 self.bridge.error_occurred.emit(str(e))
             finally:
                 self.bridge.playback_finished.emit()
@@ -1473,7 +1609,7 @@ class AutoCastGUI(QMainWindow):
                 self._remember_playback(target_device, source_type, auto_resume_enabled, capture_label=label)
                 self.bridge.status_update.emit(f"Casting {label} to {device.name}")
             except Exception as e:
-                self._cleanup_local_playback()
+                self.bridge.cleanup_requested.emit()
                 self.bridge.error_occurred.emit(str(e))
             finally:
                 self.bridge.playback_finished.emit()
@@ -1547,6 +1683,9 @@ class AutoCastGUI(QMainWindow):
         if not device:
             return
         self.status_label.setText("Stopping...")
+        self.is_user_stopping = True
+        self.playback_generation += 1
+        self.playback_poll_timer.stop()
 
         if self.is_streaming:
             self.streamer.stop()
@@ -1565,10 +1704,19 @@ class AutoCastGUI(QMainWindow):
             except Exception as e:
                 self.bridge.error_occurred.emit(str(e))
             finally:
-                self._cleanup_local_playback()
+                self.bridge.cleanup_requested.emit()
                 loop.close()
 
         threading.Thread(target=do_stop, daemon=True).start()
+
+    def _try_seek(self, loop: asyncio.AbstractEventLoop, device: Device, position: str):
+        try:
+            loop.run_until_complete(dlna_controller.seek(device, position))
+        except Exception as exc:
+            logger.warning(f"Resume seek failed: {exc}")
+
+    def _start_playback_polling(self):
+        self.playback_poll_timer.start(5000)
 
     def _set_playback_device(self, device: Device | None):
         with self._state_lock:
@@ -1579,6 +1727,9 @@ class AutoCastGUI(QMainWindow):
             return self.playback_device or self.selected_device
 
     def _cleanup_local_playback(self):
+        self.playback_poll_timer.stop()
+        self.is_polling_playback = False
+        self.is_user_stopping = False
         self.streamer.stop()
         self.is_playing = False
         self.is_streaming = False
@@ -1594,6 +1745,53 @@ class AutoCastGUI(QMainWindow):
         if not server:
             return
         server.stop_background()
+
+    def _poll_playback_status(self):
+        with self._poll_lock:
+            if self.is_polling_playback or not self.is_playing or self.is_streaming or self.is_user_stopping:
+                return
+            device = self._get_playback_device()
+            if not device or device.device_type != DeviceType.DLNA:
+                return
+            self.is_polling_playback = True
+            generation = self.playback_generation
+
+        def poll():
+            loop = asyncio.new_event_loop()
+            try:
+                position = loop.run_until_complete(dlna_controller.get_position_info(device)).get("RelTime", "")
+                if position and position != "00:00:00":
+                    self._remember_position(position)
+                info = loop.run_until_complete(dlna_controller.get_transport_info(device))
+                state = info.get("CurrentTransportState", "")
+                if state in {"STOPPED", "NO_MEDIA_PRESENT"} and not self.is_user_stopping and generation == self.playback_generation:
+                    self.bridge.next_queued_media.emit()
+            except Exception as exc:
+                logger.warning(f"Playback polling failed: {exc}")
+            finally:
+                with self._poll_lock:
+                    self.is_polling_playback = False
+                loop.close()
+
+        threading.Thread(target=poll, daemon=True).start()
+
+    def _remember_position(self, position: str):
+        with self._state_lock:
+            self.resume_state = replace(self.resume_state, position=position, queue=list(self.media_queue), queue_index=self.queue_index)
+            state = self.resume_state
+        save_state(state)
+
+    def _play_next_queued_media(self):
+        if self.is_user_stopping:
+            return
+        if not self.media_queue or self.queue_index + 1 >= len(self.media_queue):
+            self._cleanup_local_playback()
+            self.bridge.status_update.emit("Playback finished")
+            return
+        self.playback_poll_timer.stop()
+        next_index = self.queue_index + 1
+        self.bridge.status_update.emit(f"Playing next: {Path(self.media_queue[next_index]).name}")
+        self._play_media_at(next_index)
 
     def closeEvent(self, event):
         self.streamer.stop()

@@ -195,7 +195,16 @@ class TestResumeState:
     def test_state_round_trip(self, tmp_path):
         from app_state import ResumeState, load_state, save_state
         path = tmp_path / "state.json"
-        state = ResumeState(device_name="TV", device_type="dlna", device_ip="1.2.3.4", source_type="live", live_url="https://example.com/live")
+        state = ResumeState(
+            device_name="TV",
+            device_type="dlna",
+            device_ip="1.2.3.4",
+            source_type="media",
+            media_path="D:/video/a.mp4",
+            queue=["D:/video/a.mp4", "D:/video/b.mp4"],
+            queue_index=1,
+            position="00:12:34",
+        )
         save_state(state, path)
         assert load_state(path) == state
 
@@ -221,6 +230,38 @@ class TestResumeState:
         from app_state import redact_url
         url = redact_url("https://live.bilibili.com/440006?session_id=secret&token=value")
         assert url == "https://live.bilibili.com/440006"
+
+    def test_load_state_discards_invalid_queue(self, tmp_path):
+        from app_state import load_state
+        path = tmp_path / "state.json"
+        path.write_text('{"queue":"not-a-list"}', encoding="utf-8")
+        assert load_state(path).queue == []
+
+    def test_load_state_sanitizes_invalid_resume_fields(self, tmp_path):
+        from app_state import load_state
+        path = tmp_path / "state.json"
+        path.write_text('{"queue_index":"bad","position":123,"auto_resume_enabled":"yes","media_path":123,"live_url":null}', encoding="utf-8")
+        state = load_state(path)
+        assert state.queue_index == 0
+        assert state.position == ""
+        assert state.auto_resume_enabled is True
+        assert state.media_path == ""
+        assert state.live_url == ""
+
+    def test_state_for_device_stores_queue_and_position(self):
+        from app_state import state_for_device
+        device = Device("TV", DeviceType.DLNA, "1.2.3.4", 5000)
+        state = state_for_device(
+            device,
+            "media",
+            media_path="D:/video/b.mp4",
+            queue=["D:/video/a.mp4", "D:/video/b.mp4"],
+            queue_index=1,
+            position="00:01:02",
+        )
+        assert state.queue == ["D:/video/a.mp4", "D:/video/b.mp4"]
+        assert state.queue_index == 1
+        assert state.position == "00:01:02"
 
     def test_matches_device_rejects_uid_with_different_ip(self):
         from app_state import ResumeState, matches_device
@@ -580,6 +621,27 @@ class TestDLNAController:
         with patch.object(dlna_controller, "_soap_action", side_effect=fake_action):
             with pytest.raises(RuntimeError, match="Failed to start playback"):
                 await dlna_controller.play(d, "http://example.com/video.mp4", "video/mp4")
+
+    @pytest.mark.asyncio
+    async def test_get_position_info_returns_position(self):
+        import dlna_controller
+        d = Device("TV", DeviceType.DLNA, "1.1.1.1", 5000, control_url="/AVTransport/control")
+
+        async def fake_action(_device, _url, _service, action, _params):
+            assert action == "GetPositionInfo"
+            return {"RelTime": "00:01:02"}
+
+        with patch.object(dlna_controller, "_soap_action", side_effect=fake_action):
+            assert await dlna_controller.get_position_info(d) == {"RelTime": "00:01:02"}
+
+    @pytest.mark.asyncio
+    async def test_seek_raises_on_failure(self):
+        import dlna_controller
+        d = Device("TV", DeviceType.DLNA, "1.1.1.1", 5000, control_url="/AVTransport/control")
+
+        with patch.object(dlna_controller, "_soap_action", return_value=None):
+            with pytest.raises(RuntimeError, match="Failed to seek"):
+                await dlna_controller.seek(d, "00:01:02")
 
     def test_get_control_url_with_path(self):
         from dlna_controller import _get_control_url

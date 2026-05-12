@@ -151,6 +151,25 @@ async def get_transport_info(device: Device) -> dict:
     return result or {}
 
 
+async def get_position_info(device: Device) -> dict:
+    control_url = _get_control_url(device)
+    result = await _soap_action(
+        device, control_url, AVTRANSPORT_NS, "GetPositionInfo",
+        {"InstanceID": "0"},
+    )
+    return result or {}
+
+
+async def seek(device: Device, target: str):
+    control_url = _get_control_url(device)
+    result = await _soap_action(
+        device, control_url, AVTRANSPORT_NS, "Seek",
+        {"InstanceID": "0", "Unit": "REL_TIME", "Target": target},
+    )
+    if result is None:
+        raise RuntimeError(f"Failed to seek on {device.name}")
+
+
 def _get_control_url(device: Device) -> str:
     if device.control_url:
         if device.control_url.startswith("http"):

@@ -2,7 +2,7 @@
 
 import json
 import threading
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -24,6 +24,9 @@ class ResumeState:
     media_path: str = ""
     live_url: str = ""
     capture_label: str = ""
+    queue: list[str] = field(default_factory=list)
+    queue_index: int = 0
+    position: str = ""
 
 
 def load_state(path: Path = STATE_PATH) -> ResumeState:
@@ -35,8 +38,21 @@ def load_state(path: Path = STATE_PATH) -> ResumeState:
         return ResumeState()
     allowed = ResumeState.__dataclass_fields__.keys()
     cleaned = {key: data[key] for key in allowed if key in data}
+    for key in ["device_name", "device_type", "device_ip", "device_uid", "source_type", "media_path", "live_url", "capture_label"]:
+        if key in cleaned and not isinstance(cleaned[key], str):
+            cleaned[key] = ""
+    if "auto_resume_enabled" in cleaned and not isinstance(cleaned["auto_resume_enabled"], bool):
+        cleaned["auto_resume_enabled"] = True
     if "live_url" in cleaned:
-        cleaned["live_url"] = redact_url(str(cleaned["live_url"]))
+        cleaned["live_url"] = redact_url(cleaned["live_url"])
+    if "queue" in cleaned and not isinstance(cleaned["queue"], list):
+        cleaned["queue"] = []
+    if "queue" in cleaned:
+        cleaned["queue"] = [str(item) for item in cleaned["queue"]]
+    if "queue_index" in cleaned and not isinstance(cleaned["queue_index"], int):
+        cleaned["queue_index"] = 0
+    if "position" in cleaned and not isinstance(cleaned["position"], str):
+        cleaned["position"] = ""
     return ResumeState(**cleaned)
 
 
@@ -59,6 +75,9 @@ def state_for_device(device: Device, source_type: str, **values) -> ResumeState:
         media_path=values.get("media_path", ""),
         live_url=values.get("live_url", ""),
         capture_label=values.get("capture_label", ""),
+        queue=list(values.get("queue", [])),
+        queue_index=values.get("queue_index", 0),
+        position=values.get("position", ""),
     )
 
 
