@@ -78,7 +78,7 @@ async def play(device: Device, media_url: str, content_type: str = "video/mp4"):
         {"InstanceID": "0"},
     )
 
-    await _soap_action(
+    result = await _soap_action(
         device, control_url, AVTRANSPORT_NS, "SetAVTransportURI",
         {
             "InstanceID": "0",
@@ -86,21 +86,27 @@ async def play(device: Device, media_url: str, content_type: str = "video/mp4"):
             "CurrentURIMetaData": _build_didl_lite(media_url, content_type),
         },
     )
+    if result is None:
+        raise RuntimeError(f"Failed to set media URI on {device.name}")
 
-    await _soap_action(
+    result = await _soap_action(
         device, control_url, AVTRANSPORT_NS, "Play",
         {"InstanceID": "0", "Speed": "1"},
     )
+    if result is None:
+        raise RuntimeError(f"Failed to start playback on {device.name}")
     logger.info(f"Playing on {device.name}: {media_url}")
 
 
 async def stop(device: Device):
     """Stop playback."""
     control_url = _get_control_url(device)
-    await _soap_action(
+    result = await _soap_action(
         device, control_url, AVTRANSPORT_NS, "Stop",
         {"InstanceID": "0"},
     )
+    if result is None:
+        raise RuntimeError(f"Failed to stop playback on {device.name}")
     logger.info(f"Stopped on {device.name}")
 
 

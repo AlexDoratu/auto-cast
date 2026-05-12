@@ -102,7 +102,7 @@ def _buffer_size(video_bitrate: str) -> str:
 
 def _input_options(input_format: str) -> list[str]:
     if input_format == "mjpeg":
-        return ["-f", "mjpeg"]
+        return ["-f", "mpjpeg"]
     return [
         "-reconnect", "1",
         "-reconnect_streamed", "1",

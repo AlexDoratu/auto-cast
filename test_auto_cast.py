@@ -258,10 +258,10 @@ class TestFFmpegTranscoder:
         assert "mpegts" in command
         assert command[-1] == "pipe:1"
 
-    def test_build_ffmpeg_command_supports_mjpeg_input(self):
+    def test_build_ffmpeg_command_supports_multipart_mjpeg_input(self):
         from ffmpeg_transcoder import build_ffmpeg_command
         command = build_ffmpeg_command("ffmpeg", "http://127.0.0.1/stream", "mjpeg")
-        assert command[command.index("-f") + 1] == "mjpeg"
+        assert command[command.index("-f") + 1] == "mpjpeg"
         assert "-reconnect" not in command
 
     def test_build_ffmpeg_command_sets_adaptive_low_latency_video_options(self):
@@ -557,6 +557,30 @@ class TestLiveResolver:
 
 
 class TestDLNAController:
+    @pytest.mark.asyncio
+    async def test_play_raises_when_set_uri_fails(self):
+        import dlna_controller
+        d = Device("TV", DeviceType.DLNA, "1.1.1.1", 5000, control_url="/AVTransport/control")
+
+        async def fake_action(_device, _url, _service, action, _params):
+            return None if action == "SetAVTransportURI" else {}
+
+        with patch.object(dlna_controller, "_soap_action", side_effect=fake_action):
+            with pytest.raises(RuntimeError, match="Failed to set media URI"):
+                await dlna_controller.play(d, "http://example.com/video.mp4", "video/mp4")
+
+    @pytest.mark.asyncio
+    async def test_play_raises_when_play_fails(self):
+        import dlna_controller
+        d = Device("TV", DeviceType.DLNA, "1.1.1.1", 5000, control_url="/AVTransport/control")
+
+        async def fake_action(_device, _url, _service, action, _params):
+            return None if action == "Play" else {}
+
+        with patch.object(dlna_controller, "_soap_action", side_effect=fake_action):
+            with pytest.raises(RuntimeError, match="Failed to start playback"):
+                await dlna_controller.play(d, "http://example.com/video.mp4", "video/mp4")
+
     def test_get_control_url_with_path(self):
         from dlna_controller import _get_control_url
         d = Device("TV", DeviceType.DLNA, "1.1.1.1", 5000, control_url="/AVTransport/control")

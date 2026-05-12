@@ -529,7 +529,7 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
 # ── Signals Bridge ────────────────────────────────────────────────────────────
 
 class SignalBridge(QObject):
-    devices_found = Signal(list)
+    devices_found = Signal(list, int)
     status_update = Signal(str)
     error_occurred = Signal(str)
     playback_finished = Signal()
@@ -642,6 +642,8 @@ class AutoCastGUI(QMainWindow):
         self.media_path: str | None = None
         self.media_server: MediaServer | None = None
         self.playback_device: Device | None = None
+        self.is_scanning = False
+        self.scan_generation = 0
         self.is_playing = False
         self.resume_state = load_state()
         self._resume_attempted = False
@@ -1102,7 +1104,12 @@ class AutoCastGUI(QMainWindow):
             self.auto_refresh_timer.setInterval(value * 1000)
 
     def _do_auto_scan(self):
+        if self.is_scanning:
+            return
         self.status_label.setText("Scanning...")
+        self.is_scanning = True
+        self.scan_generation += 1
+        generation = self.scan_generation
 
         def do_scan():
             loop = asyncio.new_event_loop()
@@ -1110,16 +1117,22 @@ class AutoCastGUI(QMainWindow):
                 logger.info("Auto-scan starting...")
                 devices = loop.run_until_complete(scan_all(timeout=4.0))
                 logger.info(f"Auto-scan complete: {len(devices)} device(s)")
-                self.bridge.devices_found.emit(devices)
+                self.bridge.devices_found.emit(devices, generation)
             except Exception as e:
                 logger.exception("Auto-scan failed")
                 self.bridge.error_occurred.emit(str(e))
             finally:
                 loop.close()
+                self.is_scanning = False
 
         threading.Thread(target=do_scan, daemon=True).start()
 
     def _on_scan(self):
+        if self.is_scanning:
+            return
+        self.is_scanning = True
+        self.scan_generation += 1
+        generation = self.scan_generation
         self.scan_btn.setEnabled(False)
         self.scan_btn.setText("  Scanning...")
         self._scan_anim.start()
@@ -1131,16 +1144,19 @@ class AutoCastGUI(QMainWindow):
                 logger.info("Starting device scan...")
                 devices = loop.run_until_complete(scan_all(timeout=5.0))
                 logger.info(f"Scan complete: {len(devices)} device(s) found")
-                self.bridge.devices_found.emit(devices)
+                self.bridge.devices_found.emit(devices, generation)
             except Exception as e:
                 logger.exception("Scan failed")
                 self.bridge.error_occurred.emit(str(e))
             finally:
                 loop.close()
+                self.is_scanning = False
 
         threading.Thread(target=do_scan, daemon=True).start()
 
-    def _on_devices_found(self, devices: list[Device]):
+    def _on_devices_found(self, devices: list[Device], generation: int = 0):
+        if generation and generation != self.scan_generation:
+            return
         prev_ip = self.selected_device.ip if self.selected_device else None
         self.selected_device = None
         self.devices = devices
@@ -1194,9 +1210,7 @@ class AutoCastGUI(QMainWindow):
             self.status_label.setText(f"Auto #{self.scan_count}: {len(devices)} device(s) — next in {next_sec}s")
 
         if self.is_playing and playback_ip and not has_playback_device:
-            self.is_playing = False
-            self.is_streaming = False
-            self._set_playback_device(None)
+            self._cleanup_local_playback()
             self._resume_attempted = False
 
         if self.selected_device and matches_device(self.resume_state, self.selected_device):
@@ -1338,6 +1352,7 @@ class AutoCastGUI(QMainWindow):
                 else:
                     self.bridge.error_occurred.emit(f"Unsupported: {device.device_type}")
             except Exception as e:
+                self._cleanup_local_playback()
                 self.bridge.error_occurred.emit(str(e))
             finally:
                 self.bridge.playback_finished.emit()
@@ -1382,6 +1397,7 @@ class AutoCastGUI(QMainWindow):
                 self._remember_playback(target_device, "live", auto_resume_enabled, live_url=redact_url(live_url))
                 self.bridge.status_update.emit(f"Playing transcoded live stream on {device.name}")
             except Exception as e:
+                self._cleanup_local_playback()
                 self.bridge.error_occurred.emit(str(e))
             finally:
                 self.bridge.playback_finished.emit()
@@ -1457,9 +1473,10 @@ class AutoCastGUI(QMainWindow):
                 self._remember_playback(target_device, source_type, auto_resume_enabled, capture_label=label)
                 self.bridge.status_update.emit(f"Casting {label} to {device.name}")
             except Exception as e:
+                self._cleanup_local_playback()
                 self.bridge.error_occurred.emit(str(e))
-                self.is_streaming = False
             finally:
+                self.bridge.playback_finished.emit()
                 loop.close()
 
         threading.Thread(target=do_cast, daemon=True).start()
@@ -1544,13 +1561,11 @@ class AutoCastGUI(QMainWindow):
                     loop.run_until_complete(dlna_controller.stop(device))
                 elif device.device_type == DeviceType.AIRPLAY:
                     loop.run_until_complete(airplay_controller.stop(device))
-                self._stop_local_services(loop)
                 self.bridge.status_update.emit("Stopped")
-                self.is_playing = False
-                self.is_streaming = False
             except Exception as e:
                 self.bridge.error_occurred.emit(str(e))
             finally:
+                self._cleanup_local_playback()
                 loop.close()
 
         threading.Thread(target=do_stop, daemon=True).start()
@@ -1562,6 +1577,14 @@ class AutoCastGUI(QMainWindow):
     def _get_playback_device(self) -> Device | None:
         with self._state_lock:
             return self.playback_device or self.selected_device
+
+    def _cleanup_local_playback(self):
+        self.streamer.stop()
+        self.is_playing = False
+        self.is_streaming = False
+        self.cast_window_btn.setEnabled(True)
+        self.cast_screen_btn.setEnabled(True)
+        self._stop_local_services()
 
     def _stop_local_services(self, loop: asyncio.AbstractEventLoop | None = None):
         with self._state_lock:
@@ -1632,11 +1655,8 @@ class AutoCastGUI(QMainWindow):
 
     def _on_error(self, msg: str):
         self.status_label.setText(f"Error: {msg}")
-        self.is_playing = False
-        self.is_streaming = False
+        self._cleanup_local_playback()
         self.play_btn.setEnabled(True)
-        self.cast_window_btn.setEnabled(True)
-        self.cast_screen_btn.setEnabled(True)
 
     def _on_playback_finished(self):
         self.play_btn.setEnabled(True)
