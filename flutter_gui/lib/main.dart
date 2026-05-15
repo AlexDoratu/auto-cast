@@ -410,12 +410,19 @@ class _AutoCastHomeState extends State<AutoCastHome> {
       setState(() {
         downloadProgress = payload;
         final percent = (payload['percent'] as num?)?.toDouble();
-        status = percent == null ? 'Downloading video...' : 'Downloading ${_formatPercent(percent)}';
+        final phase = payload['phase']?.toString() ?? 'Downloading video';
+        status = percent == null ? phase : '$phase ${_formatPercent(percent)}';
       });
     } else if (event == 'download_complete') {
       setState(() {
         cachedVideo = payload;
-        downloadProgress = null;
+        downloadProgress = {
+          ...payload,
+          'status': 'complete',
+          'phase': 'Complete',
+          'percent': 1.0,
+          'filename': payload['path'],
+        };
         activeDownloadTaskId = null;
         status = 'Cached to ${payload['path']}';
       });
@@ -1018,7 +1025,7 @@ class _AutoCastHomeState extends State<AutoCastHome> {
         if (path != null && path.isNotEmpty) Text('File $path', maxLines: 2, overflow: TextOverflow.ellipsis),
         if (progress != null) ...[
           const SizedBox(height: 8),
-          LinearProgressIndicator(value: percent),
+          LinearProgressIndicator(value: percent?.clamp(0.0, 1.0)),
           const SizedBox(height: 6),
           Text(_downloadProgressText(progress)),
           if (activeDownloadTaskId != null) ...[
@@ -1205,14 +1212,27 @@ String _downloadProgressText(Map<String, dynamic> progress) {
   final total = progress['total_bytes'] as num?;
   final speed = progress['speed'] as num?;
   final eta = progress['eta'] as num?;
+  final phase = progress['phase']?.toString() ?? progress['status']?.toString() ?? 'downloading';
+  final parts = <String>[phase];
+  if (percent != null) {
+    parts.add(_formatPercent(percent));
+  }
+  if ((downloaded ?? 0) > 0 || (total ?? 0) > 0) {
+    parts.add('${_formatBytes(downloaded)} / ${_formatBytes(total)}');
+  }
+  if (speed != null && speed > 0) {
+    parts.add('speed ${_formatBytes(speed)}/s');
+  }
+  if (eta != null && eta > 0) {
+    parts.add('ETA ${_formatDuration(eta.round())}');
+  }
   return [
-    progress['status']?.toString() ?? 'downloading',
-    if (percent != null) _formatPercent(percent),
-    '${_formatBytes(downloaded)} / ${_formatBytes(total)}',
-    'speed ${_formatBytes(speed)}/s',
-    if (eta != null) 'ETA ${_formatDuration(eta.round())}',
+    ...parts,
   ].join('  ');
 }
+
+@visibleForTesting
+String downloadProgressTextForTest(Map<String, dynamic> progress) => _downloadProgressText(progress);
 
 class StatusChart extends StatelessWidget {
   const StatusChart({required this.samples, super.key});

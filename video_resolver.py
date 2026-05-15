@@ -54,6 +54,17 @@ def cache_video_url(url: str, progress_callback: Callable[[dict], None] | None =
     if not yt_dlp:
         raise RuntimeError("yt-dlp is required to cache video URLs")
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    if progress_callback:
+        progress_callback({
+            "status": "preparing",
+            "phase": "Preparing download",
+            "downloaded_bytes": 0,
+            "total_bytes": 0,
+            "percent": None,
+            "speed": None,
+            "eta": None,
+            "filename": "",
+        })
     options = {
         "quiet": True,
         "no_warnings": True,
@@ -66,9 +77,31 @@ def cache_video_url(url: str, progress_callback: Callable[[dict], None] | None =
     if progress_callback:
         options["progress_hooks"] = [lambda data: progress_callback(_progress_payload(data))]
     with yt_dlp.YoutubeDL(options) as ydl:
+        if progress_callback:
+            progress_callback({
+                "status": "extracting",
+                "phase": "Resolving video",
+                "downloaded_bytes": 0,
+                "total_bytes": 0,
+                "percent": None,
+                "speed": None,
+                "eta": None,
+                "filename": "",
+            })
         info = ydl.extract_info(url, download=True)
         filename = Path(ydl.prepare_filename(info))
     final_path = _merged_path(filename)
+    if progress_callback:
+        progress_callback({
+            "status": "complete",
+            "phase": "Complete",
+            "downloaded_bytes": final_path.stat().st_size if final_path.exists() else 0,
+            "total_bytes": final_path.stat().st_size if final_path.exists() else 0,
+            "percent": 1.0,
+            "speed": None,
+            "eta": 0,
+            "filename": str(final_path),
+        })
     return {
         **inspect_video_url(url),
         "path": str(final_path),
@@ -97,6 +130,8 @@ def _progress_payload(data: dict) -> dict:
     status = data.get("status") or "unknown"
     total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
     downloaded = data.get("downloaded_bytes") or 0
+    if status == "finished" and total == 0 and downloaded:
+        total = downloaded
     percent = (downloaded / total) if total else None
     return {
         "status": status,

@@ -344,7 +344,7 @@ class BridgeSession:
             self._emit_event("download_progress", payload)
 
         result = cache_video_url(url, on_progress)
-        self.last_download_progress = None
+        self.last_download_progress = {**result, "status": "complete", "phase": "Complete", "percent": 1.0}
         self._emit_event("download_complete", result)
         return result
 
@@ -382,9 +382,9 @@ class BridgeSession:
         cancel_event: threading.Event = task["cancel"]
 
         def on_progress(payload: dict):
+            payload = {**payload, "task_id": task_id}
             if cancel_event.is_set():
                 raise RuntimeError("Download cancelled")
-            payload = {**payload, "task_id": task_id}
             self.last_download_progress = payload
             self._emit_event("download_progress", payload)
 
@@ -393,7 +393,7 @@ class BridgeSession:
             result = {**result, "task_id": task_id}
             task["status"] = "completed"
             task["result"] = result
-            self.last_download_progress = None
+            self.last_download_progress = {**result, "status": "complete", "phase": "Complete", "percent": 1.0}
             self._emit_event("download_complete", result)
         except Exception as exc:
             status = "cancelled" if cancel_event.is_set() or "cancelled" in str(exc).lower() else "failed"

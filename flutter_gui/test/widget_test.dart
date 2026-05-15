@@ -17,4 +17,16 @@ void main() {
     bridge.handleLineForTest('native warning \ufffd without json');
     expect(bridge.status.value, 'native warning \ufffd without json');
   });
+
+  test('download progress text shows phase and completed percent', () {
+    expect(
+      downloadProgressTextForTest({
+        'phase': 'Complete',
+        'percent': 1.0,
+        'downloaded_bytes': 1024,
+        'total_bytes': 1024,
+      }),
+      contains('Complete  100.0%'),
+    );
+  });
 }

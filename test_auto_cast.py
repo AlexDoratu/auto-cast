@@ -765,6 +765,16 @@ class TestVideoResolver:
         assert result["filename"] == "test.mp4"
         assert result["phase"] == "Downloading video"
 
+    def test_progress_payload_treats_finished_bytes_as_total(self):
+        from video_resolver import _progress_payload
+        result = _progress_payload({
+            "status": "finished",
+            "downloaded_bytes": 100,
+            "filename": "test.mp4",
+        })
+        assert result["percent"] == 1.0
+        assert result["phase"] == "Merging"
+
     def test_video_format_prefers_h264(self):
         from video_resolver import VIDEO_FORMAT
         assert "vcodec^=avc1" in VIDEO_FORMAT
@@ -1023,6 +1033,7 @@ class TestGUIBridge:
             assert result["path"] == "D:/cache/video.mp4"
             assert events[0]["event"] == "download_progress"
             assert events[1]["event"] == "download_complete"
+            assert session.last_download_progress["percent"] == 1.0
         finally:
             session.close()
 
