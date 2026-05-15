@@ -43,8 +43,6 @@ def load_state(path: Path = STATE_PATH) -> ResumeState:
             cleaned[key] = ""
     if "auto_resume_enabled" in cleaned and not isinstance(cleaned["auto_resume_enabled"], bool):
         cleaned["auto_resume_enabled"] = True
-    if "live_url" in cleaned:
-        cleaned["live_url"] = redact_url(cleaned["live_url"])
     if "queue" in cleaned and not isinstance(cleaned["queue"], list):
         cleaned["queue"] = []
     if "queue" in cleaned:
@@ -86,7 +84,14 @@ def matches_device(state: ResumeState, device: Device) -> bool:
         return False
     if state.device_uid and device.uid:
         return state.device_ip == device.ip and state.device_uid == device.uid
+    if state.device_ip == device.ip and _matches_aggregated_capability(state, device):
+        return True
     return state.device_ip == device.ip and bool(state.device_name) and state.device_name == device.name
+
+
+def _matches_aggregated_capability(state: ResumeState, device: Device) -> bool:
+    capabilities = {str(item).lower() for item in device.services or []}
+    return len(capabilities) > 1 and bool(state.device_type) and state.device_type.lower() in capabilities
 
 
 def redact_url(url: str) -> str:

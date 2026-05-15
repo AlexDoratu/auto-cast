@@ -6,7 +6,7 @@ import socket
 import struct
 import xml.etree.ElementTree as ET
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
 import psutil
@@ -163,8 +163,8 @@ async def _fetch_dlna_description(location: str) -> Optional[Device]:
         model = find_text("modelName")
         udn = find_text("UDN")
 
-        control_url = _find_control_url(device_elem, ns, "AVTransport")
-        rendering_control_url = _find_control_url(device_elem, ns, "RenderingControl")
+        control_url = _absolute_url(location, _find_control_url(device_elem, ns, "AVTransport"))
+        rendering_control_url = _absolute_url(location, _find_control_url(device_elem, ns, "RenderingControl"))
 
         parsed = urlparse(location)
         ip = parsed.hostname
@@ -184,6 +184,12 @@ async def _fetch_dlna_description(location: str) -> Optional[Device]:
     except Exception as e:
         logger.debug(f"Failed to parse description XML from {location}: {e}")
         return None
+
+
+def _absolute_url(base_url: str, maybe_relative_url: Optional[str]) -> Optional[str]:
+    if not maybe_relative_url:
+        return None
+    return urljoin(base_url, maybe_relative_url.strip())
 
 
 def _find_control_url(device_elem, ns, service_name: str = "AVTransport") -> Optional[str]:

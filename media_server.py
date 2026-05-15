@@ -8,6 +8,7 @@ import socket
 import threading
 from pathlib import Path
 from typing import Optional
+from dataclasses import dataclass
 from uuid import uuid4
 
 from aiohttp import web
@@ -15,6 +16,13 @@ from aiohttp import web
 from ffmpeg_transcoder import FFmpegTranscoder, TS_CONTENT_TYPE
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class LiveStreamSource:
+    input_url: str
+    input_format: str = "url"
+    video_bitrate: str = "3500k"
 
 
 class MediaServer:
@@ -31,7 +39,8 @@ class MediaServer:
         self._actual_port: int = 0
         self._local_ip: str = ""
         self._registered_files: dict[str, str] = {}
-        self._live_streams: dict[str, FFmpegTranscoder] = {}
+        self._live_streams: dict[str, LiveStreamSource] = {}
+        self._active_transcoders: list[FFmpegTranscoder] = []
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ready = threading.Event()
@@ -56,8 +65,9 @@ class MediaServer:
 
     async def stop(self):
         """Stop the media server."""
-        for transcoder in list(self._live_streams.values()):
+        for transcoder in list(self._active_transcoders):
             transcoder.stop()
+        self._active_transcoders = []
         self._live_streams = {}
         if self._runner:
             await self._runner.cleanup()
@@ -100,14 +110,16 @@ class MediaServer:
 
     def register_live_stream(self, input_url: str, input_format: str = "url", video_bitrate: str = "3500k") -> str:
         stream_id = uuid4().hex
-        self._live_streams[stream_id] = FFmpegTranscoder(input_url, input_format=input_format, video_bitrate=video_bitrate)
+        self._live_streams[stream_id] = LiveStreamSource(input_url, input_format=input_format, video_bitrate=video_bitrate)
         return f"http://{self._local_ip}:{self._actual_port}/live/{stream_id}.ts"
 
     async def _handle_live_stream(self, request: web.Request) -> web.StreamResponse:
         stream_id = request.match_info["stream_id"]
-        transcoder = self._live_streams.get(stream_id)
-        if not transcoder:
+        source = self._live_streams.get(stream_id)
+        if not source:
             raise web.HTTPNotFound(text="Live stream not found")
+        transcoder = FFmpegTranscoder(source.input_url, input_format=source.input_format, video_bitrate=source.video_bitrate)
+        self._active_transcoders.append(transcoder)
 
         response = web.StreamResponse(
             status=200,
@@ -121,8 +133,14 @@ class MediaServer:
         await response.prepare(request)
         try:
             await transcoder.write_to_response(response)
+        except (asyncio.CancelledError, ConnectionError, BrokenPipeError):
+            logger.debug(f"Live stream client disconnected: {stream_id}")
+        except Exception as exc:
+            logger.debug(f"Live stream response ended: {exc}")
         finally:
             transcoder.stop()
+            if transcoder in self._active_transcoders:
+                self._active_transcoders.remove(transcoder)
         return response
 
     def _run_background(self, target_ip: str):
@@ -150,13 +168,11 @@ class MediaServer:
             raise web.HTTPNotFound(text=f"File not found: {filename}")
 
         content_type = mimetypes.guess_type(str(filepath))[0] or "application/octet-stream"
-        file_size = filepath.stat().st_size
 
         return web.FileResponse(
             path=filepath,
             headers={
                 "Content-Type": content_type,
-                "Content-Length": str(file_size),
                 "Accept-Ranges": "bytes",
             },
         )

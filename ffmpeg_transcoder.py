@@ -14,6 +14,9 @@ TS_CONTENT_TYPE = "video/mp2t"
 DEFAULT_VIDEO_BITRATE = "3500k"
 DEFAULT_BUFFER_SIZE = "7000k"
 DEFAULT_GOP_SIZE = "60"
+NETWORK_TIMEOUT_US = "10000000"
+ANALYZE_DURATION_US = "3000000"
+PROBE_SIZE_BYTES = "1000000"
 
 
 @dataclass
@@ -43,11 +46,18 @@ class FFmpegTranscoder:
         if not self.process or not self.process.stdout:
             raise RuntimeError("FFmpeg did not start")
 
-        while self.process.poll() is None:
-            chunk = await asyncio.to_thread(self.process.stdout.read, 64 * 1024)
-            if not chunk:
-                break
-            await response.write(chunk)
+        try:
+            while self.process.poll() is None:
+                chunk = await asyncio.to_thread(self.process.stdout.read, 64 * 1024)
+                if not chunk:
+                    break
+                await response.write(chunk)
+        except (asyncio.CancelledError, ConnectionError, BrokenPipeError):
+            raise
+        except RuntimeError as exc:
+            if "Cannot write to closing transport" in str(exc):
+                raise ConnectionError(str(exc)) from exc
+            raise
 
     def stop(self):
         process = self.process
@@ -105,6 +115,12 @@ def _input_options(input_format: str) -> list[str]:
         return ["-f", "mpjpeg"]
     return [
         "-reconnect", "1",
+        "-reconnect_at_eof", "1",
+        "-reconnect_on_network_error", "1",
+        "-reconnect_on_http_error", "4xx,5xx",
         "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "5",
+        "-reconnect_delay_max", "10",
+        "-rw_timeout", NETWORK_TIMEOUT_US,
+        "-analyzeduration", ANALYZE_DURATION_US,
+        "-probesize", PROBE_SIZE_BYTES,
     ]

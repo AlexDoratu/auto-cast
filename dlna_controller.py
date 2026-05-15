@@ -3,7 +3,7 @@
 import html
 import logging
 import xml.etree.ElementTree as ET
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import aiohttp
 
@@ -34,8 +34,9 @@ async def discover_dlna(ip: str) -> Device | None:
                         ns = {"upnp": "urn:schemas-upnp-org:device-1-0"}
                         name_el = root.find(".//upnp:friendlyName", ns) or root.find(".//friendlyName")
                         name = name_el.text.strip() if name_el is not None and name_el.text else ip
-                        ctrl = _find_control_url_xml(root, ns, "AVTransport")
-                        rendering_ctrl = _find_control_url_xml(root, ns, "RenderingControl")
+                        base_url = _find_text_xml(root, "URLBase") or url
+                        ctrl = _absolute_url(base_url, _find_control_url_xml(root, ns, "AVTransport"))
+                        rendering_ctrl = _absolute_url(base_url, _find_control_url_xml(root, ns, "RenderingControl"))
                         if not ctrl:
                             continue
                         return Device(
@@ -49,6 +50,20 @@ async def discover_dlna(ip: str) -> Device | None:
                 except Exception:
                     continue
     return None
+
+
+def _absolute_url(base_url: str, maybe_relative_url: str | None) -> str | None:
+    if not maybe_relative_url:
+        return None
+    return urljoin(base_url, maybe_relative_url.strip())
+
+
+def _find_text_xml(root, tag_name: str) -> str:
+    for item in root.iter():
+        tag = item.tag.split("}")[-1] if "}" in item.tag else item.tag
+        if tag == tag_name and item.text:
+            return item.text.strip()
+    return ""
 
 
 def _find_control_url_xml(root, ns, service_name: str = "AVTransport") -> str | None:
@@ -158,6 +173,23 @@ async def get_position_info(device: Device) -> dict:
         {"InstanceID": "0"},
     )
     return result or {}
+
+
+async def get_volume(device: Device) -> str:
+    if not device.rendering_control_url:
+        discovered = await discover_dlna(device.ip)
+        if discovered and discovered.rendering_control_url:
+            device.rendering_control_url = discovered.rendering_control_url
+            device.port = discovered.port
+    control_url = _get_rendering_control_url(device)
+    result = await _soap_action(
+        device,
+        control_url,
+        RENDERINGCONTROL_NS,
+        "GetVolume",
+        {"InstanceID": "0", "Channel": "Master"},
+    )
+    return result.get("CurrentVolume", "?") if result else "?"
 
 
 async def seek(device: Device, target: str):
