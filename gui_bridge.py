@@ -27,6 +27,8 @@ from scanner import scan_all
 from video_resolver import CACHE_DIR, cache_video_url, inspect_video_url
 
 TV_STATUS_TIMEOUT_SECONDS = 2.5
+START_SEEK_ATTEMPTS = 3
+START_SEEK_RETRY_DELAY_SECONDS = 0.4
 
 if hasattr(sys.stdin, "reconfigure"):
     sys.stdin.reconfigure(encoding="utf-8")
@@ -193,6 +195,22 @@ def _format_seconds(seconds: int) -> str:
     return f"{hours:02d}:{minutes:02d}:{sec:02d}"
 
 
+def _requires_seek(position: str) -> bool:
+    return _position_to_seconds(position) > 0
+
+
+def _session_started_media(device: Device, media_path: str, position: str) -> dict[str, Any]:
+    start_seconds = _position_to_seconds(position)
+    return {
+        "kind": "media",
+        "device": device_to_json(device),
+        "path": media_path,
+        "position": position,
+        "start_seconds": start_seconds,
+        "started_at": time.monotonic(),
+    }
+
+
 def _parse_int(value: Any) -> int | None:
     try:
         return int(value)
@@ -221,6 +239,29 @@ def pick_media_file() -> dict[str, Any]:
     finally:
         root.destroy()
     return {"path": path or ""}
+
+
+def pick_media_files() -> dict[str, Any]:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception as exc:
+        raise RuntimeError(f"File picker is unavailable: {exc}") from exc
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        paths = filedialog.askopenfilenames(
+            title="Choose media files",
+            filetypes=[
+                ("Media files", "*.mp4 *.mkv *.avi *.mov *.webm *.mp3 *.wav *.flac *.aac *.ogg *.jpg *.jpeg *.png *.gif *.bmp"),
+                ("All files", "*.*"),
+            ],
+        )
+    finally:
+        root.destroy()
+    return {"paths": list(paths or [])}
 
 
 class BridgeSession:
@@ -255,6 +296,8 @@ class BridgeSession:
             return {"monitors": get_monitors()}
         if name == "pick_file":
             return await asyncio.to_thread(pick_media_file)
+        if name == "pick_files":
+            return await asyncio.to_thread(pick_media_files)
         if name == "state":
             return {
                 "state": asdict(self.state),
@@ -301,6 +344,7 @@ class BridgeSession:
             raise FileNotFoundError(media_path)
         content_type = MIME_TYPES.get(path.suffix.lower(), "application/octet-stream")
         generation = self._next_generation()
+        needs_seek = _requires_seek(position)
         self._stop_server()
 
         if device.device_type == DeviceType.DLNA:
@@ -314,26 +358,34 @@ class BridgeSession:
             except Exception:
                 self._drop_server(server)
                 raise
-            if position:
-                await dlna_controller.seek(device, position)
+            if needs_seek:
+                await self._seek_start_position(device, position)
             self._remember(device, "media", media_path=media_path, position=position)
-            self.current_session = {"kind": "media", "device": device_to_json(device), "path": media_path, "position": position}
+            self.current_session = _session_started_media(device, media_path, position)
             return {"status": "playing", "url": url, "position": position}
+
+        if needs_seek:
+            dlna_device = await self._dlna_target(device)
+            result = await self._play_dlna_file(dlna_device, media_path)
+            await self._seek_start_position(dlna_device, position)
+            self._remember(dlna_device, "media", media_path=media_path, position=position)
+            self.current_session = _session_started_media(dlna_device, media_path, position)
+            return {**result, "transport": "dlna", "position": position}
 
         if device.device_type == DeviceType.AIRPLAY:
             try:
                 await airplay_controller.play(device, media_path)
                 self._set_playback_device(device, generation)
                 self._remember(device, "media", media_path=media_path)
-                self.current_session = {"kind": "media", "device": device_to_json(device), "path": media_path, "position": position}
+                self.current_session = _session_started_media(device, media_path, position)
                 return {"status": "playing", "transport": "airplay"}
             except Exception:
                 dlna_device = await self._dlna_target(device)
                 result = await self._play_dlna_file(dlna_device, media_path)
-                if position:
-                    await dlna_controller.seek(dlna_device, position)
+                if needs_seek:
+                    await self._seek_start_position(dlna_device, position)
                 self._remember(dlna_device, "media", media_path=media_path, position=position)
-                self.current_session = {"kind": "media", "device": device_to_json(dlna_device), "path": media_path, "position": position}
+                self.current_session = _session_started_media(dlna_device, media_path, position)
                 return {**result, "transport": "dlna-fallback", "position": position}
 
         raise RuntimeError(f"Unsupported device type: {device.device_type.value}")
@@ -373,7 +425,15 @@ class BridgeSession:
             return {"task_id": task_id, "status": "not_found"}
         task["cancel"].set()
         task["status"] = "cancel_requested"
-        self._emit_event("download_cancel_requested", {"task_id": task_id})
+        payload = {
+            "task_id": task_id,
+            "status": "cancel_requested",
+            "phase": "Cancelling",
+            "percent": self.last_download_progress.get("percent") if self.last_download_progress else None,
+            "filename": self.last_download_progress.get("filename") if self.last_download_progress else "",
+        }
+        self.last_download_progress = payload
+        self._emit_event("download_cancel_requested", payload)
         return {"task_id": task_id, "status": "cancel_requested"}
 
     def _run_cache_task(self, task_id: str):
@@ -390,6 +450,8 @@ class BridgeSession:
 
         try:
             result = cache_video_url(url, on_progress)
+            if cancel_event.is_set():
+                raise RuntimeError("Download cancelled")
             result = {**result, "task_id": task_id}
             task["status"] = "completed"
             task["result"] = result
@@ -407,10 +469,10 @@ class BridgeSession:
         media_path = str(command.get("path", ""))
         position = str(command.get("position", ""))
         result = await self._play_dlna_file(device, media_path)
-        if position:
-            await dlna_controller.seek(device, position)
+        if _requires_seek(position):
+            await self._seek_start_position(device, position)
         self._remember(device, "media", media_path=media_path, position=position)
-        self.current_session = {"kind": "media", "device": device_to_json(device), "path": media_path, "position": position}
+        self.current_session = _session_started_media(device, media_path, position)
         return {**result, "position": position}
 
     async def _play_dlna_file(self, device: Device, media_path: str) -> dict[str, Any]:
@@ -578,6 +640,7 @@ class BridgeSession:
 
     async def restart_stream(self, command: dict[str, Any]) -> dict[str, Any]:
         bitrate = str(command.get("video_bitrate", "3500k"))
+        fps = int(command.get("fps", 10))
         session = dict(self.current_session)
         kind = session.get("kind")
         if kind == "live":
@@ -592,7 +655,7 @@ class BridgeSession:
                 "hwnd": session.get("source_id"),
                 "monitor_index": session.get("source_id"),
                 "label": session.get("label", kind),
-                "fps": session.get("fps", 10),
+                "fps": fps,
                 "video_bitrate": bitrate,
             }, kind)
         return {"status": "skipped", "reason": "Current playback is not a restartable stream"}
@@ -609,6 +672,19 @@ class BridgeSession:
             position = _format_seconds(seconds)
         await dlna_controller.seek(device, position)
         return {"status": "ok", "position": position}
+
+    async def _seek_start_position(self, device: Device, position: str):
+        last_error: Exception | None = None
+        for attempt in range(START_SEEK_ATTEMPTS):
+            try:
+                await dlna_controller.seek(device, position)
+                return
+            except Exception as exc:
+                last_error = exc
+                if attempt < START_SEEK_ATTEMPTS - 1:
+                    await asyncio.sleep(START_SEEK_RETRY_DELAY_SECONDS)
+        if last_error:
+            raise last_error
 
     async def playback_status(self) -> dict[str, Any]:
         device = self.playback_device
@@ -666,18 +742,37 @@ class BridgeSession:
         duration = position_info.get("TrackDuration", "") or ""
         transport_state = transport_info.get("CurrentTransportState", "") or "UNKNOWN"
         transport_status = transport_info.get("CurrentTransportStatus", "") or ""
+        position_seconds = _position_to_seconds(position)
+        if position_seconds == 0 and transport_state in {"PLAYING", "TRANSITIONING", "UNKNOWN"}:
+            estimated_position = self._estimated_media_position()
+            if estimated_position is not None:
+                position_seconds = estimated_position
+                position = _format_seconds(position_seconds)
         base.update({
             "state": transport_state,
             "status": transport_status,
             "position": position,
             "duration": duration,
-            "position_seconds": _position_to_seconds(position),
+            "position_seconds": position_seconds,
             "duration_seconds": _position_to_seconds(duration),
             "volume": _parse_int(volume),
             "checked_at": time.time(),
             "latency_ms": latency_ms,
         })
         return base
+
+    def _estimated_media_position(self) -> int | None:
+        session = self.current_session
+        if session.get("kind") != "media":
+            return None
+        started_at = session.get("started_at")
+        if not isinstance(started_at, (int, float)):
+            return None
+        start_seconds = _parse_int(session.get("start_seconds"))
+        if start_seconds is None:
+            start_seconds = _position_to_seconds(str(session.get("position", "")))
+        elapsed = max(0, int(time.monotonic() - float(started_at)))
+        return start_seconds + elapsed
 
     async def _tv_query(self, label: str, awaitable, fallback):
         try:

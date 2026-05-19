@@ -57,7 +57,9 @@ class AutoCastBridge {
         .transform(const Utf8Decoder(allowMalformed: true))
         .transform(const LineSplitter())
         .listen(_handleLine, onError: _failAll);
-    _process!.stderr.transform(const Utf8Decoder(allowMalformed: true)).listen((line) {
+    _process!.stderr
+        .transform(const Utf8Decoder(allowMalformed: true))
+        .listen((line) {
       final trimmed = line.trim();
       if (trimmed.isNotEmpty) {
         status.value = trimmed;
@@ -78,8 +80,13 @@ class AutoCastBridge {
     for (final root in roots) {
       var cursor = root;
       for (var depth = 0; depth < 8; depth++) {
-        for (final filename in ['gui_bridge.exe', 'auto-cast-bridge.exe', 'gui_bridge.py']) {
-          final candidate = File('${cursor.path}${Platform.pathSeparator}$filename');
+        for (final filename in [
+          'gui_bridge.exe',
+          'auto-cast-bridge.exe',
+          'gui_bridge.py'
+        ]) {
+          final candidate =
+              File('${cursor.path}${Platform.pathSeparator}$filename');
           if (await candidate.exists()) {
             return candidate.path;
           }
@@ -100,7 +107,8 @@ class AutoCastBridge {
     }
     final bundled = 'python${Platform.pathSeparator}python.exe';
     final exeDir = File(Platform.resolvedExecutable).parent;
-    final bundledPython = File('${exeDir.path}${Platform.pathSeparator}$bundled');
+    final bundledPython =
+        File('${exeDir.path}${Platform.pathSeparator}$bundled');
     if (await bundledPython.exists()) {
       return bundledPython.path;
     }
@@ -114,7 +122,8 @@ class AutoCastBridge {
     return [bridgePath, '--stdio'];
   }
 
-  Future<Map<String, dynamic>> send(String command, Map<String, dynamic> body) async {
+  Future<Map<String, dynamic>> send(
+      String command, Map<String, dynamic> body) async {
     await start();
     final process = _process;
     if (process == null) {
@@ -143,7 +152,8 @@ class AutoCastBridge {
     }
     final event = decoded['event']?.toString();
     if (event != null) {
-      onEvent?.call(event, (decoded['payload'] as Map? ?? {}).cast<String, dynamic>());
+      onEvent?.call(
+          event, (decoded['payload'] as Map? ?? {}).cast<String, dynamic>());
       return;
     }
     final id = decoded['id'] as int?;
@@ -154,7 +164,8 @@ class AutoCastBridge {
     if (decoded['ok'] == true) {
       completer.complete((decoded['result'] as Map).cast<String, dynamic>());
     } else {
-      completer.completeError(Exception(decoded['error'] ?? 'Bridge command failed'));
+      completer.completeError(
+          Exception(decoded['error'] ?? 'Bridge command failed'));
     }
   }
 
@@ -183,10 +194,15 @@ class CastDevice {
   final Map<String, dynamic> data;
 
   String get name => data['name']?.toString() ?? 'Unknown';
-  String get type => data['display_type']?.toString() ?? data['device_type']?.toString() ?? '';
+  String get type =>
+      data['display_type']?.toString() ?? data['device_type']?.toString() ?? '';
   String get ip => data['ip']?.toString() ?? '';
   String get model => data['model']?.toString() ?? '';
-  List<String> get capabilities => (data['capabilities'] as List?)?.map((item) => item.toString()).toList() ?? const [];
+  List<String> get capabilities =>
+      (data['capabilities'] as List?)
+          ?.map((item) => item.toString())
+          .toList() ??
+      const [];
   String get subtitle {
     final details = <String>[type, ip];
     if (model.isNotEmpty) {
@@ -260,6 +276,55 @@ enum CastMode {
   final IconData icon;
 }
 
+enum QueueItemKind { media, video }
+
+class PlaybackQueueItem {
+  PlaybackQueueItem({
+    required this.kind,
+    required this.source,
+    required this.title,
+    this.startSeconds = 0,
+    this.endSeconds,
+    this.cachedPath,
+    this.cachedMeta,
+  });
+
+  final QueueItemKind kind;
+  final String source;
+  final String title;
+  final int startSeconds;
+  final int? endSeconds;
+  final String? cachedPath;
+  final Map<String, dynamic>? cachedMeta;
+
+  bool get isReady => kind == QueueItemKind.media || cachedPath != null;
+
+  PlaybackQueueItem copyWith({
+    int? startSeconds,
+    int? endSeconds,
+    String? cachedPath,
+    Map<String, dynamic>? cachedMeta,
+    String? title,
+  }) {
+    return PlaybackQueueItem(
+      kind: kind,
+      source: source,
+      title: title ?? this.title,
+      startSeconds: startSeconds ?? this.startSeconds,
+      endSeconds: endSeconds ?? this.endSeconds,
+      cachedPath: cachedPath ?? this.cachedPath,
+      cachedMeta: cachedMeta ?? this.cachedMeta,
+    );
+  }
+}
+
+class TimeRange {
+  const TimeRange({required this.startSeconds, required this.endSeconds});
+
+  final int startSeconds;
+  final int? endSeconds;
+}
+
 class AutoCastHome extends StatefulWidget {
   const AutoCastHome({super.key});
 
@@ -272,6 +337,9 @@ class _AutoCastHomeState extends State<AutoCastHome> {
   final liveController = TextEditingController();
   final videoController = TextEditingController();
   final mediaStartController = TextEditingController();
+  final mediaEndController = TextEditingController();
+  final videoStartController = TextEditingController();
+  final videoEndController = TextEditingController();
   final devices = <CastDevice>[];
   final windows = <Map<String, dynamic>>[];
   final monitors = <Map<String, dynamic>>[];
@@ -301,11 +369,17 @@ class _AutoCastHomeState extends State<AutoCastHome> {
   Map<String, dynamic>? downloadProgress;
   String cacheDir = '';
   String? activeDownloadTaskId;
+  int? activeDownloadQueueIndex;
+  String? activeDownloadSourceUrl;
   bool playAfterDownload = false;
   bool seeking = false;
   bool pollingStatus = false;
   bool autoSearchResume = false;
   bool autoResumeBusy = false;
+  bool queueActive = false;
+  bool queueAdvancing = false;
+  int currentQueueIndex = -1;
+  final playbackQueue = <PlaybackQueueItem>[];
   Timer? bitrateDebounce;
 
   @override
@@ -314,7 +388,8 @@ class _AutoCastHomeState extends State<AutoCastHome> {
     bridge.onEvent = _handleBridgeEvent;
     unawaited(_refreshSources());
     unawaited(_refreshState());
-    statusTimer = Timer.periodic(const Duration(seconds: 2), (_) => unawaited(_pollPlaybackStatus()));
+    statusTimer = Timer.periodic(
+        const Duration(seconds: 2), (_) => unawaited(_pollPlaybackStatus()));
   }
 
   @override
@@ -326,6 +401,9 @@ class _AutoCastHomeState extends State<AutoCastHome> {
     liveController.dispose();
     videoController.dispose();
     mediaStartController.dispose();
+    mediaEndController.dispose();
+    videoStartController.dispose();
+    videoEndController.dispose();
     super.dispose();
   }
 
@@ -369,11 +447,14 @@ class _AutoCastHomeState extends State<AutoCastHome> {
     }
     status = 'Auto Search & Resume enabled';
     unawaited(_tryAutoResume());
-    autoSearchTimer = Timer.periodic(const Duration(seconds: 5), (_) => unawaited(_tryAutoResume()));
+    autoSearchTimer = Timer.periodic(
+        const Duration(seconds: 5), (_) => unawaited(_tryAutoResume()));
   }
 
   Future<void> _tryAutoResume() async {
-    if (!autoSearchResume || autoResumeBusy || playbackStatus['playing'] == true) {
+    if (!autoSearchResume ||
+        autoResumeBusy ||
+        playbackStatus['playing'] == true) {
       return;
     }
     autoResumeBusy = true;
@@ -414,28 +495,97 @@ class _AutoCastHomeState extends State<AutoCastHome> {
         status = percent == null ? phase : '$phase ${_formatPercent(percent)}';
       });
     } else if (event == 'download_complete') {
+      final taskId = payload['task_id']?.toString();
+      final completedQueueIndex = activeDownloadQueueIndex;
+      final payloadSource = _nonEmptyString(payload['source_url']);
+      if (payloadSource != null &&
+          activeDownloadSourceUrl != null &&
+          payloadSource != activeDownloadSourceUrl) {
+        return;
+      }
+      final expectedDirectDownload = playAfterDownload &&
+          (taskId == null ||
+              activeDownloadTaskId == null ||
+              taskId == activeDownloadTaskId);
+      final expectedQueueDownload = completedQueueIndex != null &&
+          (taskId == null ||
+              activeDownloadTaskId == null ||
+              taskId == activeDownloadTaskId);
+      if (taskId != null && !expectedDirectDownload && !expectedQueueDownload) {
+        return;
+      }
+      final completedSource =
+          _nonEmptyString(payload['source_url']) ?? activeDownloadSourceUrl;
+      final completedPayload = {
+        ...payload,
+        if (completedSource != null) 'source_url': completedSource,
+      };
+      final shouldPlayAfterDownload = playAfterDownload;
+      final queueIndexToPlay = queueIndexToPlayAfterDownloadForTest(
+        queueActive: queueActive,
+        queueAdvancing: queueAdvancing,
+        currentQueueIndex: currentQueueIndex,
+        completedQueueIndex: completedQueueIndex,
+      );
       setState(() {
-        cachedVideo = payload;
+        if (completedQueueIndex != null &&
+            completedQueueIndex >= 0 &&
+            completedQueueIndex < playbackQueue.length) {
+          final index = completedQueueIndex;
+          final item = playbackQueue[index];
+          playbackQueue[index] = item.copyWith(
+            cachedPath: completedPayload['path']?.toString(),
+            cachedMeta: completedPayload,
+            title: completedPayload['title']?.toString() ?? item.title,
+          );
+        }
+        cachedVideo = completedPayload;
         downloadProgress = {
-          ...payload,
+          ...completedPayload,
           'status': 'complete',
           'phase': 'Complete',
           'percent': 1.0,
-          'filename': payload['path'],
+          'filename': completedPayload['path'],
         };
         activeDownloadTaskId = null;
-        status = 'Cached to ${payload['path']}';
-      });
-      if (playAfterDownload) {
+        activeDownloadQueueIndex = null;
+        activeDownloadSourceUrl = null;
         playAfterDownload = false;
-        unawaited(_playCachedVideo(payload));
+        status = 'Cached to ${completedPayload['path']}';
+      });
+      if (shouldPlayAfterDownload) {
+        unawaited(_playCachedVideo(completedPayload));
+      } else if (queueIndexToPlay != null) {
+        unawaited(_playQueueItem(queueIndexToPlay));
+      } else {
+        unawaited(_maybePrefetchNextQueueVideo());
       }
     } else if (event == 'download_failed') {
       setState(() {
         activeDownloadTaskId = null;
+        activeDownloadQueueIndex = null;
+        activeDownloadSourceUrl = null;
         playAfterDownload = false;
-        downloadProgress = null;
-        status = '${payload['status']}: ${payload['error']}';
+        if (payload['status'] == 'cancelled') {
+          downloadProgress = {
+            ...payload,
+            'phase': 'Cancelled',
+          };
+          status = 'Download cancelled';
+        } else {
+          downloadProgress = null;
+          status = '${payload['status']}: ${payload['error']}';
+        }
+      });
+    } else if (event == 'download_cancel_requested') {
+      setState(() {
+        playAfterDownload = false;
+        activeDownloadSourceUrl = null;
+        downloadProgress = {
+          ...payload,
+          'phase': 'Cancelling',
+        };
+        status = 'Cancelling download...';
       });
     }
   }
@@ -458,6 +608,7 @@ class _AutoCastHomeState extends State<AutoCastHome> {
           statusSamples.removeRange(0, statusSamples.length - 90);
         }
       });
+      _maybeAdvanceQueue(result);
     } catch (error) {
       if (mounted) {
         setState(() => playbackStatus = {
@@ -466,8 +617,7 @@ class _AutoCastHomeState extends State<AutoCastHome> {
               'status': error.toString(),
             });
       }
-    }
-    finally {
+    } finally {
       pollingStatus = false;
     }
   }
@@ -479,10 +629,12 @@ class _AutoCastHomeState extends State<AutoCastHome> {
       setState(() {
         windows
           ..clear()
-          ..addAll((windowResult['windows'] as List? ?? []).map((item) => (item as Map).cast<String, dynamic>()));
+          ..addAll((windowResult['windows'] as List? ?? [])
+              .map((item) => (item as Map).cast<String, dynamic>()));
         monitors
           ..clear()
-          ..addAll((monitorResult['monitors'] as List? ?? []).map((item) => (item as Map).cast<String, dynamic>()));
+          ..addAll((monitorResult['monitors'] as List? ?? [])
+              .map((item) => (item as Map).cast<String, dynamic>()));
         selectedWindowIndex = windows.isEmpty ? null : 0;
         selectedMonitorIndex = 0;
         status = 'Capture sources refreshed';
@@ -522,6 +674,42 @@ class _AutoCastHomeState extends State<AutoCastHome> {
     }
   }
 
+  Future<void> _pickFilesForQueue() async {
+    try {
+      setState(() => status = 'Opening file picker...');
+      final result = await bridge.send('pick_files', {});
+      final paths = (result['paths'] as List? ?? [])
+          .map((item) => item.toString())
+          .where((item) => item.isNotEmpty)
+          .toList();
+      if (paths.isEmpty) {
+        setState(() => status = 'File selection cancelled');
+        return;
+      }
+      final range =
+          _readTimeRange(mediaStartController.text, mediaEndController.text);
+      if (range == null) {
+        return;
+      }
+      setState(() {
+        selectedFile = paths.first;
+        playbackQueue.addAll([
+          for (final path in paths)
+            PlaybackQueueItem(
+              kind: QueueItemKind.media,
+              source: path,
+              title: _basename(path),
+              startSeconds: range.startSeconds,
+              endSeconds: range.endSeconds,
+            ),
+        ]);
+        status = 'Added ${paths.length} file(s) to queue';
+      });
+    } catch (error) {
+      setState(() => status = error.toString());
+    }
+  }
+
   Future<void> _playFile() async {
     final device = selectedDevice;
     final path = selectedFile;
@@ -531,10 +719,35 @@ class _AutoCastHomeState extends State<AutoCastHome> {
     }
     await _run('Starting media playback...', () async {
       final position = _normalizePosition(mediaStartController.text);
-      await bridge.send('play_media', {'device': device.data, 'path': path, 'position': position});
+      await bridge.send('play_media',
+          {'device': device.data, 'path': path, 'position': position});
       final suffix = position.isEmpty ? '' : ' from $position';
-      setState(() => status = 'Playing ${_basename(path)} on ${device.name}$suffix');
+      setState(
+          () => status = 'Playing ${_basename(path)} on ${device.name}$suffix');
       unawaited(_pollPlaybackStatus());
+    });
+  }
+
+  void _addSelectedFileToQueue() {
+    final path = selectedFile;
+    if (path == null || path.isEmpty) {
+      setState(() => status = 'Select a media file first');
+      return;
+    }
+    final range =
+        _readTimeRange(mediaStartController.text, mediaEndController.text);
+    if (range == null) {
+      return;
+    }
+    setState(() {
+      playbackQueue.add(PlaybackQueueItem(
+        kind: QueueItemKind.media,
+        source: path,
+        title: _basename(path),
+        startSeconds: range.startSeconds,
+        endSeconds: range.endSeconds,
+      ));
+      status = 'Added ${_basename(path)} to queue';
     });
   }
 
@@ -565,11 +778,40 @@ class _AutoCastHomeState extends State<AutoCastHome> {
     await _run('Inspecting video...', () async {
       final result = await bridge.send('inspect_video', {'url': url});
       setState(() {
-        inspectedVideo = result;
+        inspectedVideo = {...result, 'source_url': url};
         cachedVideo = null;
         status = '${result['title']}  ${result['duration_string'] ?? ''}';
       });
     });
+  }
+
+  void _addVideoUrlToQueue() {
+    final url = videoController.text.trim();
+    if (url.isEmpty) {
+      setState(() => status = 'Enter a video URL first');
+      return;
+    }
+    final urlStart = _parsePositionSecondsFromUrl(url);
+    final range = _readTimeRange(
+      videoStartController.text,
+      videoEndController.text,
+      fallbackStart: urlStart ?? 0,
+    );
+    if (range == null) {
+      return;
+    }
+    final item = videoQueueItemForTest(
+      url: url,
+      inspectedVideo: inspectedVideo,
+      cachedVideo: cachedVideo,
+      startSeconds: range.startSeconds,
+      endSeconds: range.endSeconds,
+    );
+    setState(() {
+      playbackQueue.add(item);
+      status = 'Added video URL to queue';
+    });
+    unawaited(_maybePrefetchNextQueueVideo());
   }
 
   Future<void> _cacheAndPlayVideo() async {
@@ -580,11 +822,14 @@ class _AutoCastHomeState extends State<AutoCastHome> {
       return;
     }
     await _run('Starting cache task...', () async {
-      setState(() => downloadProgress = {'status': 'starting', 'percent': 0.0});
+      setState(() {
+        activeDownloadSourceUrl = url;
+        playAfterDownload = true;
+        downloadProgress = {'status': 'starting', 'percent': 0.0};
+      });
       final started = await bridge.send('cache_video', {'url': url});
       setState(() {
         activeDownloadTaskId = started['task_id']?.toString();
-        playAfterDownload = true;
         status = 'Caching video...';
       });
     });
@@ -611,16 +856,248 @@ class _AutoCastHomeState extends State<AutoCastHome> {
     });
   }
 
+  Future<void> _startQueue() async {
+    if (selectedDevice == null) {
+      setState(() => status = 'Select a device first');
+      return;
+    }
+    if (playbackQueue.isEmpty) {
+      setState(() => status = 'Add at least one queue item first');
+      return;
+    }
+    setState(() {
+      queueActive = true;
+      queueAdvancing = false;
+      currentQueueIndex = -1;
+    });
+    await _playQueueItem(0);
+  }
+
+  void _stopQueue() {
+    setState(() {
+      queueActive = false;
+      queueAdvancing = false;
+      currentQueueIndex = -1;
+      status = 'Queue stopped';
+    });
+  }
+
+  Future<void> _playQueueItem(int index) async {
+    final device = selectedDevice;
+    if (device == null || index < 0 || index >= playbackQueue.length) {
+      setState(() {
+        _resetQueuePlaybackState();
+        status = 'Queue finished';
+      });
+      return;
+    }
+    final item = playbackQueue[index];
+    setState(() {
+      queueAdvancing = true;
+      currentQueueIndex = index;
+      status = 'Starting queue item ${index + 1}/${playbackQueue.length}';
+    });
+    try {
+      final position = _formatDuration(item.startSeconds);
+      if (item.kind == QueueItemKind.media) {
+        await bridge.send('play_media',
+            {'device': device.data, 'path': item.source, 'position': position});
+      } else {
+        final path = item.cachedPath;
+        if (path == null || path.isEmpty) {
+          if (activeDownloadQueueIndex == index) {
+            setState(() {
+              playAfterDownload = false;
+              status =
+                  'Waiting for queue item ${index + 1}/${playbackQueue.length} to finish caching...';
+            });
+            return;
+          }
+          setState(() {
+            activeDownloadQueueIndex = index;
+            activeDownloadSourceUrl = item.source;
+            playAfterDownload = false;
+            downloadProgress = {'status': 'starting', 'percent': 0.0};
+            status =
+                'Caching queue item ${index + 1}/${playbackQueue.length}...';
+          });
+          final started =
+              await bridge.send('cache_video', {'url': item.source});
+          setState(() {
+            if (activeDownloadQueueIndex == index) {
+              activeDownloadTaskId = started['task_id']?.toString();
+            }
+          });
+          return;
+        }
+        await bridge.send('play_cached_video',
+            {'device': device.data, 'path': path, 'position': position});
+      }
+      setState(() {
+        queueAdvancing = false;
+        status =
+            'Playing queue item ${index + 1}/${playbackQueue.length}: ${item.title}';
+      });
+      unawaited(_maybePrefetchNextQueueVideo());
+      unawaited(_pollPlaybackStatus());
+    } catch (error) {
+      setState(() {
+        _resetQueuePlaybackState();
+        status = error.toString();
+      });
+    }
+  }
+
+  void _maybeAdvanceQueue(Map<String, dynamic> statusResult) {
+    if (!queueActive ||
+        queueAdvancing ||
+        currentQueueIndex < 0 ||
+        currentQueueIndex >= playbackQueue.length) {
+      return;
+    }
+    final endSeconds = playbackQueue[currentQueueIndex].endSeconds;
+    if (endSeconds == null) {
+      final state = statusResult['state']?.toString() ?? '';
+      if (state == 'STOPPED' || state == 'NO_MEDIA_PRESENT') {
+        unawaited(_playQueueItem(currentQueueIndex + 1));
+      }
+      return;
+    }
+    final position = (statusResult['position_seconds'] as num?)?.toInt() ?? 0;
+    if (position >= endSeconds) {
+      unawaited(_playQueueItem(currentQueueIndex + 1));
+    }
+  }
+
+  Future<void> _maybePrefetchNextQueueVideo() async {
+    if (!queueActive) {
+      return;
+    }
+    final index = nextQueueVideoToCacheForTest(
+      playbackQueue,
+      currentQueueIndex: currentQueueIndex,
+      activeDownloadTaskId: activeDownloadTaskId,
+      activeDownloadQueueIndex: activeDownloadQueueIndex,
+      playAfterDownload: playAfterDownload,
+    );
+    if (index == null) {
+      return;
+    }
+    final item = playbackQueue[index];
+    setState(() {
+      activeDownloadQueueIndex = index;
+      activeDownloadSourceUrl = item.source;
+      playAfterDownload = false;
+      downloadProgress = {'status': 'starting', 'percent': 0.0};
+      status = 'Caching queue item ${index + 1}/${playbackQueue.length}...';
+    });
+    try {
+      final started = await bridge.send('cache_video', {'url': item.source});
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        if (activeDownloadQueueIndex == index) {
+          activeDownloadTaskId = started['task_id']?.toString();
+        }
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        if (activeDownloadQueueIndex == index) {
+          activeDownloadTaskId = null;
+          activeDownloadQueueIndex = null;
+          activeDownloadSourceUrl = null;
+          downloadProgress = null;
+        }
+        status = error.toString();
+      });
+    }
+  }
+
+  void _removeQueueItem(int index) {
+    if (index < 0 || index >= playbackQueue.length) {
+      return;
+    }
+    setState(() {
+      playbackQueue.removeAt(index);
+      if (currentQueueIndex == index) {
+        _resetQueuePlaybackState();
+      } else if (currentQueueIndex > index) {
+        currentQueueIndex -= 1;
+      }
+      status = 'Removed queue item';
+    });
+  }
+
+  void _clearQueue() {
+    setState(() {
+      playbackQueue.clear();
+      _resetQueuePlaybackState();
+      status = 'Queue cleared';
+    });
+  }
+
+  void _resetQueuePlaybackState() {
+    queueActive = false;
+    queueAdvancing = false;
+    currentQueueIndex = -1;
+    activeDownloadQueueIndex = null;
+    activeDownloadSourceUrl = null;
+  }
+
+  TimeRange? _readTimeRange(String startInput, String endInput,
+      {int fallbackStart = 0}) {
+    final startText = startInput.trim();
+    final endText = endInput.trim();
+    final start =
+        startText.isEmpty ? fallbackStart : _parsePositionSeconds(startText);
+    final end = endText.isEmpty ? null : _parsePositionSeconds(endText);
+    if (start == null) {
+      setState(() => status = 'Invalid start time');
+      return null;
+    }
+    if (endText.isNotEmpty && end == null) {
+      setState(() => status = 'Invalid end time');
+      return null;
+    }
+    if (end != null && end <= start) {
+      setState(() => status = 'End time must be later than start time');
+      return null;
+    }
+    return TimeRange(startSeconds: start, endSeconds: end);
+  }
+
   Future<void> _cancelCache() async {
     final taskId = activeDownloadTaskId;
     if (taskId == null) {
       return;
     }
-    await bridge.send('cancel_cache', {'task_id': taskId});
+    final cancellingQueueDownload = activeDownloadQueueIndex != null;
     setState(() {
       status = 'Cancelling download...';
       playAfterDownload = false;
+      downloadProgress = {
+        ...?downloadProgress,
+        'task_id': taskId,
+        'status': 'cancel_requested',
+        'phase': 'Cancelling',
+      };
+      activeDownloadQueueIndex = null;
+      activeDownloadSourceUrl = null;
+      if (cancellingQueueDownload) {
+        _resetQueuePlaybackState();
+      }
     });
+    try {
+      await bridge.send('cancel_cache', {'task_id': taskId});
+    } catch (error) {
+      if (mounted) {
+        setState(() => status = error.toString());
+      }
+    }
   }
 
   Future<void> _seekTo(double seconds) async {
@@ -668,7 +1145,8 @@ class _AutoCastHomeState extends State<AutoCastHome> {
       setState(() => status = 'Select a device and monitor first');
       return;
     }
-    final monitor = monitors[selectedMonitorIndex.clamp(0, monitors.length - 1).toInt()];
+    final monitor =
+        monitors[selectedMonitorIndex.clamp(0, monitors.length - 1).toInt()];
     await _run('Starting screen cast...', () async {
       await bridge.send('cast_screen', {
         'device': device.data,
@@ -692,12 +1170,17 @@ class _AutoCastHomeState extends State<AutoCastHome> {
 
   Future<void> _setVolume(double value) async {
     setState(() => volume = value);
+  }
+
+  Future<void> _applyVolume(double value) async {
+    setState(() => volume = value);
     final device = selectedDevice;
     if (device == null) {
       return;
     }
     try {
-      await bridge.send('set_volume', {'device': device.data, 'volume': value.round()});
+      await bridge
+          .send('set_volume', {'device': device.data, 'volume': value.round()});
     } catch (error) {
       setState(() => status = error.toString());
     }
@@ -705,11 +1188,29 @@ class _AutoCastHomeState extends State<AutoCastHome> {
 
   void _setBitrate(double value) {
     setState(() => bitrate = value);
-    bitrateDebounce?.cancel();
-    bitrateDebounce = Timer(const Duration(milliseconds: 900), () => unawaited(_applyBitrateRestart()));
   }
 
-  Future<void> _applyBitrateRestart() async {
+  void _applyBitrate(double value) {
+    setState(() => bitrate = value);
+    _scheduleStreamRestart();
+  }
+
+  void _setFps(double value) {
+    setState(() => fps = value);
+  }
+
+  void _applyFps(double value) {
+    setState(() => fps = value);
+    _scheduleStreamRestart();
+  }
+
+  void _scheduleStreamRestart() {
+    bitrateDebounce?.cancel();
+    bitrateDebounce = Timer(const Duration(milliseconds: 250),
+        () => unawaited(_applyStreamRestart()));
+  }
+
+  Future<void> _applyStreamRestart() async {
     if (playbackStatus['playing'] != true) {
       return;
     }
@@ -719,9 +1220,15 @@ class _AutoCastHomeState extends State<AutoCastHome> {
       return;
     }
     try {
-      setState(() => status = 'Restarting stream at ${bitrate.round()}k...');
-      final result = await bridge.send('restart_stream', {'video_bitrate': '${bitrate.round()}k'});
-      setState(() => status = result['status'] == 'skipped' ? result['reason'].toString() : 'Stream restarted at ${bitrate.round()}k');
+      setState(() => status =
+          'Restarting stream at ${bitrate.round()}k / ${fps.round()} fps...');
+      final result = await bridge.send('restart_stream', {
+        'video_bitrate': '${bitrate.round()}k',
+        'fps': fps.round(),
+      });
+      setState(() => status = result['status'] == 'skipped'
+          ? result['reason'].toString()
+          : 'Stream restarted at ${bitrate.round()}k / ${fps.round()} fps');
       unawaited(_pollPlaybackStatus());
     } catch (error) {
       setState(() => status = error.toString());
@@ -756,7 +1263,11 @@ class _AutoCastHomeState extends State<AutoCastHome> {
           const SizedBox(height: 14),
           FilledButton.icon(
             onPressed: busy ? null : _scan,
-            icon: busy ? const SizedBox.square(dimension: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.radar),
+            icon: busy
+                ? const SizedBox.square(
+                    dimension: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.radar),
             label: const Text('Scan Devices'),
           ),
           const SizedBox(height: 12),
@@ -769,11 +1280,16 @@ class _AutoCastHomeState extends State<AutoCastHome> {
                 final selected = identical(device, selectedDevice);
                 return ListTile(
                   selected: selected,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  tileColor: selected ? Theme.of(context).colorScheme.primaryContainer : Theme.of(context).colorScheme.surfaceContainerHighest,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8)),
+                  tileColor: selected
+                      ? Theme.of(context).colorScheme.primaryContainer
+                      : Theme.of(context).colorScheme.surfaceContainerHighest,
                   leading: const Icon(Icons.tv),
-                  title: Text(device.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-                  subtitle: Text(device.subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  title: Text(device.name,
+                      maxLines: 1, overflow: TextOverflow.ellipsis),
+                  subtitle: Text(device.subtitle,
+                      maxLines: 1, overflow: TextOverflow.ellipsis),
                   onTap: () => setState(() => selectedDevice = device),
                 );
               },
@@ -803,7 +1319,7 @@ class _AutoCastHomeState extends State<AutoCastHome> {
             const SizedBox(height: 16),
             _modeCards(),
             const SizedBox(height: 16),
-            _activeModePanel(),
+            _controlWorkspace(),
             const SizedBox(height: 16),
             _sliders(),
           ],
@@ -815,7 +1331,9 @@ class _AutoCastHomeState extends State<AutoCastHome> {
   Widget _modeCards() {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final cardWidth = constraints.maxWidth < 760 ? (constraints.maxWidth - 12) / 2 : (constraints.maxWidth - 36) / 4;
+        final cardWidth = constraints.maxWidth < 760
+            ? (constraints.maxWidth - 12) / 2
+            : (constraints.maxWidth - 36) / 4;
         return Wrap(
           spacing: 12,
           runSpacing: 12,
@@ -838,9 +1356,14 @@ class _AutoCastHomeState extends State<AutoCastHome> {
       onTap: () => setState(() => selectedMode = mode),
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: selected ? Theme.of(context).colorScheme.primaryContainer : Theme.of(context).colorScheme.surface,
+          color: selected
+              ? Theme.of(context).colorScheme.primaryContainer
+              : Theme.of(context).colorScheme.surface,
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: selected ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.outlineVariant),
+          border: Border.all(
+              color: selected
+                  ? Theme.of(context).colorScheme.primary
+                  : Theme.of(context).colorScheme.outlineVariant),
         ),
         child: Padding(
           padding: const EdgeInsets.all(14),
@@ -848,7 +1371,9 @@ class _AutoCastHomeState extends State<AutoCastHome> {
             children: [
               Icon(mode.icon),
               const SizedBox(width: 10),
-              Expanded(child: Text(mode.label, maxLines: 1, overflow: TextOverflow.ellipsis)),
+              Expanded(
+                  child: Text(mode.label,
+                      maxLines: 1, overflow: TextOverflow.ellipsis)),
             ],
           ),
         ),
@@ -865,6 +1390,33 @@ class _AutoCastHomeState extends State<AutoCastHome> {
     };
   }
 
+  Widget _controlWorkspace() {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final controls = _activeModePanel();
+        final queue = _queuePanel();
+        if (constraints.maxWidth < 980) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              controls,
+              const SizedBox(height: 16),
+              queue,
+            ],
+          );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(flex: 6, child: controls),
+            const SizedBox(width: 16),
+            Expanded(flex: 5, child: queue),
+          ],
+        );
+      },
+    );
+  }
+
   Widget _statusBar() {
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -877,7 +1429,9 @@ class _AutoCastHomeState extends State<AutoCastHome> {
           children: [
             Icon(busy ? Icons.sync : Icons.info_outline),
             const SizedBox(width: 10),
-            Expanded(child: Text(status, maxLines: 2, overflow: TextOverflow.ellipsis)),
+            Expanded(
+                child:
+                    Text(status, maxLines: 2, overflow: TextOverflow.ellipsis)),
             const SizedBox(width: 12),
             Text('Auto Resume', style: Theme.of(context).textTheme.labelMedium),
             Switch(value: autoSearchResume, onChanged: _setAutoSearchResume),
@@ -894,8 +1448,10 @@ class _AutoCastHomeState extends State<AutoCastHome> {
     final sourceType = playbackStatus['source_type']?.toString() ?? '';
     final position = playbackStatus['position']?.toString() ?? '';
     final duration = playbackStatus['duration']?.toString() ?? '';
-    final positionSeconds = (playbackStatus['position_seconds'] as num?)?.toDouble() ?? 0;
-    final durationSeconds = (playbackStatus['duration_seconds'] as num?)?.toDouble() ?? 0;
+    final positionSeconds =
+        (playbackStatus['position_seconds'] as num?)?.toDouble() ?? 0;
+    final durationSeconds =
+        (playbackStatus['duration_seconds'] as num?)?.toDouble() ?? 0;
     final volumeValue = playbackStatus['volume'];
     final latencyMs = playbackStatus['latency_ms'];
     final checkedAt = (playbackStatus['checked_at'] as num?)?.toDouble();
@@ -925,26 +1481,36 @@ class _AutoCastHomeState extends State<AutoCastHome> {
                 children: [
                   Row(
                     children: [
-                      Icon(playing ? Icons.cast_connected : Icons.cast, color: statusColor),
+                      Icon(playing ? Icons.cast_connected : Icons.cast,
+                          color: statusColor),
                       const SizedBox(width: 8),
-                      Expanded(child: Text(state, style: Theme.of(context).textTheme.titleMedium)),
+                      Expanded(
+                          child: Text(state,
+                              style: Theme.of(context).textTheme.titleMedium)),
                     ],
                   ),
                   const SizedBox(height: 8),
-                  Text(detail.isEmpty ? 'Waiting for playback status' : detail, maxLines: 2, overflow: TextOverflow.ellipsis),
+                  Text(detail.isEmpty ? 'Waiting for playback status' : detail,
+                      maxLines: 2, overflow: TextOverflow.ellipsis),
                   const SizedBox(height: 8),
                   Text('Source ${sourceType.isEmpty ? '--' : sourceType}'),
-                  Text('Pos ${position.isEmpty ? '--' : position}/${duration.isEmpty ? '--' : duration}'),
+                  Text(
+                      'Pos ${position.isEmpty ? '--' : position}/${duration.isEmpty ? '--' : duration}'),
                   Text('Vol ${volumeValue == null ? '--' : '$volumeValue%'}'),
-                  Text('TV latency ${showTvMetrics && latencyMs != null ? '${latencyMs}ms' : '--'}'),
-                  Text('Last check ${showTvMetrics && checkedAt != null ? _formatClock(checkedAt) : '--'}'),
-                  Text('Rate ${showTvMetrics && playRate != null ? '${playRate.toStringAsFixed(2)}x' : '--'}'),
+                  Text(
+                      'TV latency ${showTvMetrics && latencyMs != null ? '${latencyMs}ms' : '--'}'),
+                  Text(
+                      'Last check ${showTvMetrics && checkedAt != null ? _formatClock(checkedAt) : '--'}'),
+                  Text(
+                      'Rate ${showTvMetrics && playRate != null ? '${playRate.toStringAsFixed(2)}x' : '--'}'),
                   if (durationSeconds > 0)
                     Slider(
                       value: positionSeconds.clamp(0, durationSeconds),
                       min: 0,
                       max: durationSeconds,
-                      divisions: durationSeconds > 0 ? durationSeconds.round().clamp(1, 1000) : null,
+                      divisions: durationSeconds > 0
+                          ? durationSeconds.round().clamp(1, 1000)
+                          : null,
                       label: _formatDuration(positionSeconds.round()),
                       onChangeEnd: seeking ? null : _seekTo,
                       onChanged: (_) {},
@@ -966,20 +1532,71 @@ class _AutoCastHomeState extends State<AutoCastHome> {
   }
 
   Widget _mediaControls() {
+    final rangeLabel = _rangePreview(
+        mediaStartController.text, mediaEndController.text,
+        fallbackStart: 0);
     return _panel(
       title: 'Media File',
       icon: Icons.video_file,
       children: [
-        OutlinedButton.icon(onPressed: busy ? null : _pickFile, icon: const Icon(Icons.folder_open), label: const Text('Choose File')),
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            OutlinedButton.icon(
+                onPressed: busy ? null : _pickFile,
+                icon: const Icon(Icons.folder_open),
+                label: const Text('Choose File')),
+            OutlinedButton.icon(
+                onPressed: busy ? null : _pickFilesForQueue,
+                icon: const Icon(Icons.playlist_add),
+                label: const Text('Choose Multiple')),
+          ],
+        ),
         const SizedBox(height: 10),
-        Text(selectedFile == null ? 'No file selected' : _basename(selectedFile!), maxLines: 2, overflow: TextOverflow.ellipsis),
+        Text(
+            selectedFile == null
+                ? 'No file selected'
+                : _basename(selectedFile!),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis),
         const SizedBox(height: 10),
-        TextField(
-          controller: mediaStartController,
-          decoration: const InputDecoration(labelText: 'Start time, e.g. 01:01:09 or 3669', border: OutlineInputBorder()),
+        Text(rangeLabel, style: Theme.of(context).textTheme.labelMedium),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: mediaStartController,
+                decoration: const InputDecoration(
+                    labelText: 'Start time', border: OutlineInputBorder()),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: TextField(
+                controller: mediaEndController,
+                decoration: const InputDecoration(
+                    labelText: 'End time', border: OutlineInputBorder()),
+              ),
+            ),
+          ],
         ),
         const SizedBox(height: 14),
-        FilledButton.icon(onPressed: busy ? null : _playFile, icon: const Icon(Icons.play_arrow), label: const Text('Play File')),
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            FilledButton.icon(
+                onPressed: busy ? null : _playFile,
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('Play File')),
+            FilledButton.tonalIcon(
+                onPressed: busy ? null : _addSelectedFileToQueue,
+                icon: const Icon(Icons.queue),
+                label: const Text('Add to Queue')),
+          ],
+        ),
       ],
     );
   }
@@ -991,10 +1608,14 @@ class _AutoCastHomeState extends State<AutoCastHome> {
       children: [
         TextField(
           controller: liveController,
-          decoration: const InputDecoration(labelText: 'Live URL', border: OutlineInputBorder()),
+          decoration: const InputDecoration(
+              labelText: 'Live URL', border: OutlineInputBorder()),
         ),
         const SizedBox(height: 24),
-        FilledButton.icon(onPressed: busy ? null : _playLive, icon: const Icon(Icons.cast), label: const Text('Play Live')),
+        FilledButton.icon(
+            onPressed: busy ? null : _playLive,
+            icon: const Icon(Icons.cast),
+            label: const Text('Play Live')),
       ],
     );
   }
@@ -1005,24 +1626,73 @@ class _AutoCastHomeState extends State<AutoCastHome> {
     final duration = video?['duration_string']?.toString();
     final start = video?['start_time']?.toString();
     final progress = downloadProgress;
-    final percent = (progress?['percent'] as num?)?.toDouble();
-    final path = cachedVideo?['path']?.toString() ?? progress?['filename']?.toString();
+    final percent = progress == null
+        ? null
+        : downloadProgressIndicatorValueForTest(progress);
+    final path =
+        cachedVideo?['path']?.toString() ?? progress?['filename']?.toString();
+    final urlStart = _parsePositionSecondsFromUrl(videoController.text) ?? 0;
+    final rangeLabel = _rangePreview(
+        videoStartController.text, videoEndController.text,
+        fallbackStart: urlStart);
     return _panel(
       title: 'Video URL',
       icon: Icons.ondemand_video,
       children: [
         TextField(
           controller: videoController,
-          decoration: const InputDecoration(labelText: 'Bilibili or video page URL', border: OutlineInputBorder()),
+          decoration: const InputDecoration(
+              labelText: 'Bilibili or video page URL',
+              border: OutlineInputBorder()),
         ),
         const SizedBox(height: 10),
-        OutlinedButton.icon(onPressed: busy ? null : _inspectVideo, icon: const Icon(Icons.info_outline), label: const Text('Inspect')),
+        Text(rangeLabel, style: Theme.of(context).textTheme.labelMedium),
         const SizedBox(height: 10),
-        if (title != null) Text(title, maxLines: 2, overflow: TextOverflow.ellipsis),
-        if (duration != null) Text('Duration $duration  Start ${start ?? '0'}s'),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: videoStartController,
+                decoration: const InputDecoration(
+                    labelText: 'Start time', border: OutlineInputBorder()),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: TextField(
+                controller: videoEndController,
+                decoration: const InputDecoration(
+                    labelText: 'End time / next video',
+                    border: OutlineInputBorder()),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            OutlinedButton.icon(
+                onPressed: busy ? null : _inspectVideo,
+                icon: const Icon(Icons.info_outline),
+                label: const Text('Inspect')),
+            FilledButton.tonalIcon(
+                onPressed: busy ? null : _addVideoUrlToQueue,
+                icon: const Icon(Icons.playlist_add),
+                label: const Text('Add to Queue')),
+          ],
+        ),
+        const SizedBox(height: 10),
+        if (title != null)
+          Text(title, maxLines: 2, overflow: TextOverflow.ellipsis),
+        if (duration != null)
+          Text('Duration $duration  Start ${start ?? '0'}s'),
         const SizedBox(height: 8),
-        Text('Cache folder ${cacheDir.isEmpty ? '--' : cacheDir}', maxLines: 1, overflow: TextOverflow.ellipsis),
-        if (path != null && path.isNotEmpty) Text('File $path', maxLines: 2, overflow: TextOverflow.ellipsis),
+        Text('Cache folder ${cacheDir.isEmpty ? '--' : cacheDir}',
+            maxLines: 1, overflow: TextOverflow.ellipsis),
+        if (path != null && path.isNotEmpty)
+          Text('File $path', maxLines: 2, overflow: TextOverflow.ellipsis),
         if (progress != null) ...[
           const SizedBox(height: 8),
           LinearProgressIndicator(value: percent?.clamp(0.0, 1.0)),
@@ -1030,12 +1700,134 @@ class _AutoCastHomeState extends State<AutoCastHome> {
           Text(_downloadProgressText(progress)),
           if (activeDownloadTaskId != null) ...[
             const SizedBox(height: 8),
-            OutlinedButton.icon(onPressed: busy ? null : _cancelCache, icon: const Icon(Icons.cancel), label: const Text('Cancel Download')),
+            OutlinedButton.icon(
+              onPressed: downloadProgress?['status'] == 'cancel_requested'
+                  ? null
+                  : _cancelCache,
+              icon: const Icon(Icons.cancel),
+              label: const Text('Cancel Download'),
+            ),
           ],
         ],
         const SizedBox(height: 14),
-        FilledButton.icon(onPressed: busy ? null : _cacheAndPlayVideo, icon: const Icon(Icons.download_for_offline), label: const Text('Cache & Play')),
+        FilledButton.icon(
+            onPressed: busy ? null : _cacheAndPlayVideo,
+            icon: const Icon(Icons.download_for_offline),
+            label: const Text('Cache & Play')),
       ],
+    );
+  }
+
+  Widget _queuePanel() {
+    final readyCount = playbackQueue.where((item) => item.isReady).length;
+    final queueSummary = playbackQueue.isEmpty
+        ? 'No items'
+        : '$readyCount/${playbackQueue.length} ready';
+    return _panel(
+      title: 'Playback Queue',
+      icon: Icons.queue_music,
+      children: [
+        Row(
+          children: [
+            Icon(
+              queueActive ? Icons.play_circle : Icons.list_alt,
+              color: queueActive
+                  ? Theme.of(context).colorScheme.primary
+                  : Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(queueActive
+                  ? 'Playing ${currentQueueIndex + 1}/${playbackQueue.length}'
+                  : queueSummary),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 300),
+          child: playbackQueue.isEmpty
+              ? DecoratedBox(
+                  decoration: BoxDecoration(
+                    color:
+                        Theme.of(context).colorScheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Padding(
+                    padding: EdgeInsets.all(18),
+                    child: Center(child: Text('No queued videos')),
+                  ),
+                )
+              : ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: playbackQueue.length,
+                  separatorBuilder: (_, __) => const Divider(height: 12),
+                  itemBuilder: (context, index) =>
+                      _queueTile(index, playbackQueue[index]),
+                ),
+        ),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            FilledButton.icon(
+              onPressed: busy || playbackQueue.isEmpty ? null : _startQueue,
+              icon: const Icon(Icons.playlist_play),
+              label: const Text('Start Queue'),
+            ),
+            OutlinedButton.icon(
+              onPressed: queueActive ? _stopQueue : null,
+              icon: const Icon(Icons.stop_circle),
+              label: const Text('Stop Queue'),
+            ),
+            OutlinedButton.icon(
+              onPressed:
+                  playbackQueue.isEmpty || queueActive ? null : _clearQueue,
+              icon: const Icon(Icons.clear_all),
+              label: const Text('Clear'),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _queueTile(int index, PlaybackQueueItem item) {
+    final active = queueActive && currentQueueIndex == index;
+    final range =
+        '${_formatDuration(item.startSeconds)} -> ${item.endSeconds == null ? 'end' : _formatDuration(item.endSeconds!)}';
+    final stateLabel =
+        item.kind == QueueItemKind.video && item.cachedPath == null
+            ? 'cache pending'
+            : 'ready';
+    final statusColor = active
+        ? Theme.of(context).colorScheme.primary
+        : item.isReady
+            ? Colors.green
+            : Theme.of(context).colorScheme.tertiary;
+    return ListTile(
+      dense: true,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      tileColor: active
+          ? Theme.of(context).colorScheme.primaryContainer
+          : Theme.of(context).colorScheme.surfaceContainerHighest,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+      leading: CircleAvatar(
+        radius: 16,
+        backgroundColor: statusColor.withValues(alpha: 0.18),
+        foregroundColor: statusColor,
+        child: Text('${index + 1}'),
+      ),
+      title: Text(item.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: Text('$range  ${item.kind.name}  $stateLabel',
+          maxLines: 1, overflow: TextOverflow.ellipsis),
+      trailing: IconButton(
+        tooltip: 'Remove',
+        onPressed: active ? null : () => _removeQueueItem(index),
+        icon: const Icon(Icons.delete_outline),
+      ),
+      selected: active,
     );
   }
 
@@ -1044,31 +1836,48 @@ class _AutoCastHomeState extends State<AutoCastHome> {
       title: 'Capture',
       icon: Icons.screenshot_monitor,
       children: [
-        OutlinedButton.icon(onPressed: busy ? null : _refreshSources, icon: const Icon(Icons.refresh), label: const Text('Refresh Sources')),
+        OutlinedButton.icon(
+            onPressed: busy ? null : _refreshSources,
+            icon: const Icon(Icons.refresh),
+            label: const Text('Refresh Sources')),
         const SizedBox(height: 10),
         DropdownButtonFormField<int>(
           initialValue: selectedWindowIndex,
-          decoration: const InputDecoration(labelText: 'Window', border: OutlineInputBorder()),
+          decoration: const InputDecoration(
+              labelText: 'Window', border: OutlineInputBorder()),
           items: [
             for (var i = 0; i < windows.length; i++)
-              DropdownMenuItem(value: i, child: Text(windows[i]['title']?.toString() ?? 'Window $i', overflow: TextOverflow.ellipsis)),
+              DropdownMenuItem(
+                  value: i,
+                  child: Text(windows[i]['title']?.toString() ?? 'Window $i',
+                      overflow: TextOverflow.ellipsis)),
           ],
           onChanged: (value) => setState(() => selectedWindowIndex = value),
         ),
         const SizedBox(height: 10),
-        FilledButton.tonalIcon(onPressed: busy ? null : _castWindow, icon: const Icon(Icons.web_asset), label: const Text('Cast Window')),
+        FilledButton.tonalIcon(
+            onPressed: busy ? null : _castWindow,
+            icon: const Icon(Icons.web_asset),
+            label: const Text('Cast Window')),
         const SizedBox(height: 14),
         DropdownButtonFormField<int>(
           initialValue: monitors.isEmpty ? null : selectedMonitorIndex,
-          decoration: const InputDecoration(labelText: 'Monitor', border: OutlineInputBorder()),
+          decoration: const InputDecoration(
+              labelText: 'Monitor', border: OutlineInputBorder()),
           items: [
             for (var i = 0; i < monitors.length; i++)
-              DropdownMenuItem(value: i, child: Text(monitors[i]['name']?.toString() ?? 'Monitor $i')),
+              DropdownMenuItem(
+                  value: i,
+                  child: Text(monitors[i]['name']?.toString() ?? 'Monitor $i')),
           ],
-          onChanged: (value) => setState(() => selectedMonitorIndex = value ?? 0),
+          onChanged: (value) =>
+              setState(() => selectedMonitorIndex = value ?? 0),
         ),
         const SizedBox(height: 10),
-        FilledButton.icon(onPressed: busy ? null : _castScreen, icon: const Icon(Icons.desktop_windows), label: const Text('Cast Screen')),
+        FilledButton.icon(
+            onPressed: busy ? null : _castScreen,
+            icon: const Icon(Icons.desktop_windows),
+            label: const Text('Cast Screen')),
       ],
     );
   }
@@ -1082,15 +1891,46 @@ class _AutoCastHomeState extends State<AutoCastHome> {
       child: LayoutBuilder(
         builder: (context, constraints) {
           final rows = [
-            _sliderRow(Icons.volume_up, Slider(value: volume, min: 0, max: 100, divisions: 20, label: '${volume.round()}%', onChanged: _setVolume), '${volume.round()}%'),
-            _sliderRow(Icons.speed, Slider(value: bitrate, min: 1000, max: 8000, divisions: 14, label: '${bitrate.round()}k', onChanged: _setBitrate), '${bitrate.round()}k'),
-            _sliderRow(Icons.motion_photos_on, Slider(value: fps, min: 5, max: 30, divisions: 5, label: '${fps.round()} fps', onChanged: (value) => setState(() => fps = value)), '${fps.round()} fps'),
+            _sliderRow(
+                Icons.volume_up,
+                Slider(
+                    value: volume,
+                    min: 0,
+                    max: 100,
+                    divisions: 20,
+                    label: '${volume.round()}%',
+                    onChanged: _setVolume,
+                    onChangeEnd: _applyVolume),
+                '${volume.round()}%'),
+            _sliderRow(
+                Icons.speed,
+                Slider(
+                    value: bitrate,
+                    min: 1000,
+                    max: 8000,
+                    divisions: 14,
+                    label: '${bitrate.round()}k',
+                    onChanged: _setBitrate,
+                    onChangeEnd: _applyBitrate),
+                '${bitrate.round()}k'),
+            _sliderRow(
+                Icons.motion_photos_on,
+                Slider(
+                    value: fps,
+                    min: 5,
+                    max: 30,
+                    divisions: 5,
+                    label: '${fps.round()} fps',
+                    onChanged: _setFps,
+                    onChangeEnd: _applyFps),
+                '${fps.round()} fps'),
           ];
           return Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
             child: constraints.maxWidth < 820
                 ? Column(children: rows)
-                : Row(children: rows.map((row) => Expanded(child: row)).toList()),
+                : Row(
+                    children: rows.map((row) => Expanded(child: row)).toList()),
           );
         },
       ),
@@ -1110,7 +1950,10 @@ class _AutoCastHomeState extends State<AutoCastHome> {
     );
   }
 
-  Widget _panel({required String title, required IconData icon, required List<Widget> children}) {
+  Widget _panel(
+      {required String title,
+      required IconData icon,
+      required List<Widget> children}) {
     return DecoratedBox(
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
@@ -1118,13 +1961,17 @@ class _AutoCastHomeState extends State<AutoCastHome> {
         border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
       ),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 300),
+        constraints: const BoxConstraints(minHeight: 260),
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Row(children: [Icon(icon), const SizedBox(width: 8), Text(title, style: Theme.of(context).textTheme.titleMedium)]),
+              Row(children: [
+                Icon(icon),
+                const SizedBox(width: 8),
+                Text(title, style: Theme.of(context).textTheme.titleMedium)
+              ]),
               const SizedBox(height: 16),
               ...children,
             ],
@@ -1157,10 +2004,137 @@ String _normalizePosition(String input) {
     return _formatDuration(double.parse(value).round());
   }
   final parts = value.split(':');
-  if (parts.length == 3 && parts.every((part) => RegExp(r'^\d+$').hasMatch(part))) {
+  if (parts.length == 3 &&
+      parts.every((part) => RegExp(r'^\d+$').hasMatch(part))) {
     return '${parts[0].padLeft(2, '0')}:${parts[1].padLeft(2, '0')}:${parts[2].padLeft(2, '0')}';
   }
   return value;
+}
+
+int? _parsePositionSeconds(String input) {
+  final value = input.trim();
+  if (value.isEmpty) {
+    return null;
+  }
+  if (RegExp(r'^\d+(\.\d+)?$').hasMatch(value)) {
+    return double.parse(value).round();
+  }
+  final parts = value.split(':');
+  if (parts.length == 2 &&
+      parts.every((part) => RegExp(r'^\d+$').hasMatch(part))) {
+    return int.parse(parts[0]) * 60 + int.parse(parts[1]);
+  }
+  if (parts.length == 3 &&
+      parts.every((part) => RegExp(r'^\d+$').hasMatch(part))) {
+    return int.parse(parts[0]) * 3600 +
+        int.parse(parts[1]) * 60 +
+        int.parse(parts[2]);
+  }
+  return null;
+}
+
+int? _parsePositionSecondsFromUrl(String input) {
+  final uri = Uri.tryParse(input);
+  final value = uri?.queryParameters['t'] ?? uri?.queryParameters['start'];
+  if (value == null || value.isEmpty) {
+    return null;
+  }
+  return _parsePositionSeconds(
+      value.endsWith('s') ? value.substring(0, value.length - 1) : value);
+}
+
+String _rangePreview(String startInput, String endInput,
+    {int fallbackStart = 0}) {
+  final start = _parsePositionSeconds(startInput) ?? fallbackStart;
+  final end = _parsePositionSeconds(endInput);
+  return 'Queue range ${_formatDuration(start)} -> ${end == null ? 'end' : _formatDuration(end)}';
+}
+
+String? _nonEmptyString(Object? value) {
+  final text = value?.toString().trim();
+  return text == null || text.isEmpty ? null : text;
+}
+
+String? _metadataSourceUrl(Map<String, dynamic>? metadata) =>
+    _nonEmptyString(metadata?['source_url']);
+
+bool _metadataMatchesUrl(Map<String, dynamic>? metadata, String url) {
+  final sourceUrl = _metadataSourceUrl(metadata);
+  return sourceUrl != null && sourceUrl == url.trim();
+}
+
+@visibleForTesting
+PlaybackQueueItem videoQueueItemForTest({
+  required String url,
+  Map<String, dynamic>? inspectedVideo,
+  Map<String, dynamic>? cachedVideo,
+  int startSeconds = 0,
+  int? endSeconds,
+}) {
+  final cleanUrl = url.trim();
+  final matchingInspection =
+      _metadataMatchesUrl(inspectedVideo, cleanUrl) ? inspectedVideo : null;
+  final matchingCache =
+      _metadataMatchesUrl(cachedVideo, cleanUrl) ? cachedVideo : null;
+  final title = _nonEmptyString(matchingInspection?['title']) ??
+      _nonEmptyString(matchingCache?['title']) ??
+      cleanUrl;
+  return PlaybackQueueItem(
+    kind: QueueItemKind.video,
+    source: cleanUrl,
+    title: title,
+    startSeconds: startSeconds,
+    endSeconds: endSeconds,
+    cachedPath: _nonEmptyString(matchingCache?['path']),
+    cachedMeta: matchingCache == null
+        ? null
+        : {
+            ...matchingCache,
+            'source_url': cleanUrl,
+          },
+  );
+}
+
+@visibleForTesting
+int? nextQueueVideoToCacheForTest(
+  List<PlaybackQueueItem> queue, {
+  required int currentQueueIndex,
+  required String? activeDownloadTaskId,
+  required int? activeDownloadQueueIndex,
+  required bool playAfterDownload,
+}) {
+  if (playAfterDownload ||
+      activeDownloadTaskId != null ||
+      activeDownloadQueueIndex != null) {
+    return null;
+  }
+  final start = (currentQueueIndex + 1).clamp(0, queue.length);
+  for (var index = start; index < queue.length; index++) {
+    final item = queue[index];
+    if (item.kind == QueueItemKind.video && !item.isReady) {
+      return index;
+    }
+  }
+  return null;
+}
+
+@visibleForTesting
+int? queueIndexToPlayAfterDownloadForTest({
+  required bool queueActive,
+  required bool queueAdvancing,
+  required int currentQueueIndex,
+  required int? completedQueueIndex,
+}) {
+  if (!queueActive || completedQueueIndex == null) {
+    return null;
+  }
+  if (!queueAdvancing && currentQueueIndex == -1 && completedQueueIndex == 0) {
+    return completedQueueIndex;
+  }
+  if (!queueAdvancing || completedQueueIndex != currentQueueIndex) {
+    return null;
+  }
+  return completedQueueIndex;
 }
 
 String _formatPercent(double value) {
@@ -1168,7 +2142,8 @@ String _formatPercent(double value) {
 }
 
 String _formatClock(double epochSeconds) {
-  final time = DateTime.fromMillisecondsSinceEpoch((epochSeconds * 1000).round());
+  final time =
+      DateTime.fromMillisecondsSinceEpoch((epochSeconds * 1000).round());
   return '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}:${time.second.toString().padLeft(2, '0')}';
 }
 
@@ -1212,10 +2187,17 @@ String _downloadProgressText(Map<String, dynamic> progress) {
   final total = progress['total_bytes'] as num?;
   final speed = progress['speed'] as num?;
   final eta = progress['eta'] as num?;
-  final phase = progress['phase']?.toString() ?? progress['status']?.toString() ?? 'downloading';
+  final fragmentIndex = progress['fragment_index'] as num?;
+  final fragmentCount = progress['fragment_count'] as num?;
+  final phase = progress['phase']?.toString() ??
+      progress['status']?.toString() ??
+      'downloading';
   final parts = <String>[phase];
   if (percent != null) {
     parts.add(_formatPercent(percent));
+  }
+  if (fragmentIndex != null && fragmentCount != null) {
+    parts.add('part ${fragmentIndex.round()}/${fragmentCount.round()}');
   }
   if ((downloaded ?? 0) > 0 || (total ?? 0) > 0) {
     parts.add('${_formatBytes(downloaded)} / ${_formatBytes(total)}');
@@ -1231,8 +2213,32 @@ String _downloadProgressText(Map<String, dynamic> progress) {
   ].join('  ');
 }
 
+double? _downloadProgressIndicatorValue(Map<String, dynamic> progress) {
+  if (progress['estimated'] == true) {
+    return null;
+  }
+  return (progress['percent'] as num?)?.toDouble().clamp(0.0, 1.0);
+}
+
 @visibleForTesting
-String downloadProgressTextForTest(Map<String, dynamic> progress) => _downloadProgressText(progress);
+String downloadProgressTextForTest(Map<String, dynamic> progress) =>
+    _downloadProgressText(progress);
+
+@visibleForTesting
+double? downloadProgressIndicatorValueForTest(Map<String, dynamic> progress) =>
+    _downloadProgressIndicatorValue(progress);
+
+@visibleForTesting
+int? parsePositionSecondsForTest(String input) => _parsePositionSeconds(input);
+
+@visibleForTesting
+int? parsePositionSecondsFromUrlForTest(String input) =>
+    _parsePositionSecondsFromUrl(input);
+
+@visibleForTesting
+String rangePreviewForTest(String startInput, String endInput,
+        {int fallbackStart = 0}) =>
+    _rangePreview(startInput, endInput, fallbackStart: fallbackStart);
 
 class StatusChart extends StatelessWidget {
   const StatusChart({required this.samples, super.key});
@@ -1266,7 +2272,9 @@ class StatusChart extends StatelessWidget {
               children: [
                 _legendSwatch(lineColor, 'Status'),
                 _legendSwatch(progressColor, 'Progress'),
-                Text(samples.isEmpty ? 'Waiting' : 'Last ${samples.length * 2}s', style: Theme.of(context).textTheme.labelMedium),
+                Text(
+                    samples.isEmpty ? 'Waiting' : 'Last ${samples.length * 2}s',
+                    style: Theme.of(context).textTheme.labelMedium),
               ],
             ),
           ),
@@ -1309,19 +2317,25 @@ class StatusChartPainter extends CustomPainter {
     final labelPainter = TextPainter(textDirection: TextDirection.ltr);
     for (var i = 0; i <= 4; i++) {
       final y = chartRect.top + chartRect.height * i / 4;
-      canvas.drawLine(Offset(chartRect.left, y), Offset(chartRect.right, y), axisPaint);
+      canvas.drawLine(
+          Offset(chartRect.left, y), Offset(chartRect.right, y), axisPaint);
       final value = (1 - i / 4).toStringAsFixed(2);
-      labelPainter.text = TextSpan(text: value, style: TextStyle(color: axisColor, fontSize: 10));
+      labelPainter.text = TextSpan(
+          text: value, style: TextStyle(color: axisColor, fontSize: 10));
       labelPainter.layout();
       labelPainter.paint(canvas, Offset(2, y - 6));
     }
-    canvas.drawLine(Offset(chartRect.left, chartRect.bottom), Offset(chartRect.right, chartRect.bottom), axisPaint);
-    labelPainter.text = TextSpan(text: '0s', style: TextStyle(color: axisColor, fontSize: 10));
+    canvas.drawLine(Offset(chartRect.left, chartRect.bottom),
+        Offset(chartRect.right, chartRect.bottom), axisPaint);
+    labelPainter.text =
+        TextSpan(text: '0s', style: TextStyle(color: axisColor, fontSize: 10));
     labelPainter.layout();
     labelPainter.paint(canvas, Offset(chartRect.left, chartRect.bottom + 4));
-    labelPainter.text = TextSpan(text: 'now', style: TextStyle(color: axisColor, fontSize: 10));
+    labelPainter.text =
+        TextSpan(text: 'now', style: TextStyle(color: axisColor, fontSize: 10));
     labelPainter.layout();
-    labelPainter.paint(canvas, Offset(chartRect.right - labelPainter.width, chartRect.bottom + 4));
+    labelPainter.paint(canvas,
+        Offset(chartRect.right - labelPainter.width, chartRect.bottom + 4));
     if (samples.length < 2) {
       return;
     }
@@ -1330,7 +2344,8 @@ class StatusChartPainter extends CustomPainter {
       final path = Path();
       for (var i = 0; i < samples.length; i++) {
         final x = chartRect.left + chartRect.width * i / (samples.length - 1);
-        final y = chartRect.bottom - chartRect.height * valueOf(samples[i]).clamp(0.0, 1.0);
+        final y = chartRect.bottom -
+            chartRect.height * valueOf(samples[i]).clamp(0.0, 1.0);
         if (i == 0) {
           path.moveTo(x, y);
         } else {
@@ -1356,7 +2371,8 @@ class StatusChartPainter extends CustomPainter {
     for (var i = 0; i < samples.length; i++) {
       final sample = samples[i];
       final x = chartRect.left + chartRect.width * i / (samples.length - 1);
-      final y = chartRect.bottom - chartRect.height * sample.score.clamp(0.0, 1.0);
+      final y =
+          chartRect.bottom - chartRect.height * sample.score.clamp(0.0, 1.0);
       dotPaint.color = switch (sample.state) {
         'PLAYING' => Colors.greenAccent,
         'ERROR' => Colors.redAccent,

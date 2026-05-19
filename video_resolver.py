@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
@@ -14,7 +15,7 @@ except ImportError:
 
 
 CACHE_DIR = Path.home() / ".auto-cast" / "cache"
-VIDEO_FORMAT = "bv*[vcodec^=avc1][height<=720]+ba[acodec^=mp4a]/b[vcodec^=avc1][height<=720]/b[height<=720]"
+VIDEO_FORMAT = "bv*[vcodec^=avc1][height<=?720]+ba[acodec^=mp4a]/b[vcodec^=avc1][height<=?720]/b[height<=?720]"
 
 
 def start_time_from_url(url: str) -> int:
@@ -54,6 +55,12 @@ def cache_video_url(url: str, progress_callback: Callable[[dict], None] | None =
     if not yt_dlp:
         raise RuntimeError("yt-dlp is required to cache video URLs")
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    started_at = time.monotonic()
+
+    def emit_progress(payload: dict):
+        if progress_callback:
+            progress_callback(_with_estimated_percent(payload, started_at))
+
     if progress_callback:
         progress_callback({
             "status": "preparing",
@@ -75,10 +82,10 @@ def cache_video_url(url: str, progress_callback: Callable[[dict], None] | None =
         "restrictfilenames": True,
     }
     if progress_callback:
-        options["progress_hooks"] = [lambda data: progress_callback(_progress_payload(data))]
+        options["progress_hooks"] = [lambda data: emit_progress(_progress_payload(data))]
     with yt_dlp.YoutubeDL(options) as ydl:
         if progress_callback:
-            progress_callback({
+            emit_progress({
                 "status": "extracting",
                 "phase": "Resolving video",
                 "downloaded_bytes": 0,
@@ -92,7 +99,7 @@ def cache_video_url(url: str, progress_callback: Callable[[dict], None] | None =
         filename = Path(ydl.prepare_filename(info))
     final_path = _merged_path(filename)
     if progress_callback:
-        progress_callback({
+        emit_progress({
             "status": "complete",
             "phase": "Complete",
             "downloaded_bytes": final_path.stat().st_size if final_path.exists() else 0,
@@ -104,6 +111,7 @@ def cache_video_url(url: str, progress_callback: Callable[[dict], None] | None =
         })
     return {
         **inspect_video_url(url),
+        "source_url": url,
         "path": str(final_path),
         "start_position": format_seconds(start_time_from_url(url)),
     }
@@ -130,19 +138,45 @@ def _progress_payload(data: dict) -> dict:
     status = data.get("status") or "unknown"
     total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
     downloaded = data.get("downloaded_bytes") or 0
+    fragment_index = _int_or_none(data.get("fragment_index"))
+    fragment_count = _int_or_none(data.get("fragment_count"))
     if status == "finished" and total == 0 and downloaded:
         total = downloaded
     percent = (downloaded / total) if total else None
+    if percent is None and fragment_index and fragment_count:
+        percent = min(1.0, max(0.0, fragment_index / fragment_count))
     return {
         "status": status,
         "filename": data.get("filename") or "",
         "downloaded_bytes": downloaded,
         "total_bytes": total,
         "percent": percent,
+        "fragment_index": fragment_index,
+        "fragment_count": fragment_count,
         "speed": data.get("speed"),
         "eta": data.get("eta"),
         "phase": _phase_label(data),
     }
+
+
+def _int_or_none(value) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _with_estimated_percent(payload: dict, started_at: float) -> dict:
+    if payload.get("percent") is not None:
+        return payload
+    status = payload.get("status")
+    if status not in {"preparing", "extracting", "downloading"}:
+        return payload
+    elapsed = max(0.0, time.monotonic() - started_at)
+    # Unknown-size downloads still need visible activity. Cap below 95% until yt-dlp reports completion.
+    estimate = min(0.95, 0.02 + elapsed / 180)
+    return {**payload, "percent": estimate, "estimated": True}
 
 
 def _phase_label(data: dict) -> str:

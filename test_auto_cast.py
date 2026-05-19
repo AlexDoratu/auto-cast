@@ -775,10 +775,69 @@ class TestVideoResolver:
         assert result["percent"] == 1.0
         assert result["phase"] == "Merging"
 
+    def test_progress_payload_uses_fragment_progress_when_bytes_unknown(self):
+        from video_resolver import _progress_payload
+        result = _progress_payload({
+            "status": "downloading",
+            "fragment_index": 3,
+            "fragment_count": 10,
+            "filename": "test.m4s",
+        })
+        assert result["percent"] == 0.3
+        assert result["fragment_index"] == 3
+        assert result["fragment_count"] == 10
+
+    def test_estimated_progress_for_unknown_size_download(self):
+        from video_resolver import _with_estimated_percent
+        import video_resolver
+
+        with patch.object(video_resolver.time, "monotonic", return_value=30):
+            result = _with_estimated_percent({"status": "downloading", "percent": None}, 0)
+        assert 0 < result["percent"] < 1
+        assert result["estimated"] is True
+
+    def test_cache_video_result_includes_source_url(self, tmp_path):
+        import video_resolver
+
+        cached_file = tmp_path / "Fake-p9.mp4"
+        cached_file.write_bytes(b"fake")
+
+        class FakeYdl:
+            def __init__(self, _options):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def extract_info(self, _url, download=False):
+                return {
+                    "title": "p9",
+                    "duration": 10,
+                    "id": "p9",
+                    "extractor_key": "Fake",
+                }
+
+            def prepare_filename(self, _info):
+                return str(cached_file)
+
+        with patch.object(video_resolver, "CACHE_DIR", tmp_path):
+            with patch.object(video_resolver.yt_dlp, "YoutubeDL", FakeYdl):
+                result = video_resolver.cache_video_url("https://example.com/p9")
+
+        assert result["source_url"] == "https://example.com/p9"
+        assert result["path"] == str(cached_file)
+
     def test_video_format_prefers_h264(self):
         from video_resolver import VIDEO_FORMAT
         assert "vcodec^=avc1" in VIDEO_FORMAT
         assert "acodec^=mp4a" in VIDEO_FORMAT
+
+    def test_video_format_allows_unknown_direct_mp4_metadata(self):
+        from video_resolver import VIDEO_FORMAT
+        assert "height<=?720" in VIDEO_FORMAT
 
 
 class TestDLNAController:
@@ -1002,6 +1061,31 @@ class TestGUIBridge:
             session.close()
 
     @pytest.mark.asyncio
+    async def test_bridge_playback_status_estimates_media_position_without_rel_time(self):
+        from gui_bridge import BridgeSession
+        import gui_bridge
+        import dlna_controller
+
+        session = BridgeSession()
+        session.playback_device = Device("TV", DeviceType.DLNA, "1.1.1.1", 5000)
+        session.current_session = {
+            "kind": "media",
+            "position": "00:10:00",
+            "started_at": 100.0,
+        }
+
+        try:
+            with patch.object(gui_bridge.time, "monotonic", return_value=130.0):
+                with patch.object(dlna_controller, "get_position_info", return_value={}):
+                    with patch.object(dlna_controller, "get_transport_info", return_value={"CurrentTransportState": "PLAYING"}):
+                        with patch.object(dlna_controller, "get_volume", return_value="55"):
+                            result = await session.handle({"command": "playback_status"})
+            assert result["position"] == "00:10:30"
+            assert result["position_seconds"] == 630
+        finally:
+            session.close()
+
+    @pytest.mark.asyncio
     async def test_bridge_seek_uses_seconds(self):
         from gui_bridge import BridgeSession
         import dlna_controller
@@ -1051,6 +1135,36 @@ class TestGUIBridge:
         finally:
             session.close()
 
+    def test_bridge_cancelled_cache_does_not_emit_complete(self):
+        from gui_bridge import BridgeSession
+        import gui_bridge
+
+        events = []
+        session = BridgeSession(event_sink=events.append)
+        session.download_tasks["task-1"] = {
+            "id": "task-1",
+            "url": "https://example.com/video",
+            "status": "running",
+            "cancel": __import__("threading").Event(),
+            "result": None,
+            "error": "",
+        }
+
+        def fake_cache(_url, callback):
+            session.cancel_cache("task-1")
+            callback({"status": "downloading", "phase": "Downloading video"})
+            return {"path": "D:/cache/video.mp4"}
+
+        try:
+            with patch.object(gui_bridge, "cache_video_url", side_effect=fake_cache):
+                session._run_cache_task("task-1")
+            event_names = [event["event"] for event in events]
+            assert "download_complete" not in event_names
+            assert events[-1]["event"] == "download_failed"
+            assert events[-1]["payload"]["status"] == "cancelled"
+        finally:
+            session.close()
+
     @pytest.mark.asyncio
     async def test_bridge_pick_file_command(self):
         from gui_bridge import BridgeSession
@@ -1061,6 +1175,19 @@ class TestGUIBridge:
             with patch.object(gui_bridge, "pick_media_file", return_value={"path": "D:/video/test.mp4"}):
                 result = await session.handle({"command": "pick_file"})
             assert result["path"] == "D:/video/test.mp4"
+        finally:
+            session.close()
+
+    @pytest.mark.asyncio
+    async def test_bridge_pick_files_command(self):
+        from gui_bridge import BridgeSession
+        import gui_bridge
+
+        session = BridgeSession()
+        try:
+            with patch.object(gui_bridge, "pick_media_files", return_value={"paths": ["D:/video/a.mp4", "D:/video/b.mp4"]}):
+                result = await session.handle({"command": "pick_files"})
+            assert result["paths"] == ["D:/video/a.mp4", "D:/video/b.mp4"]
         finally:
             session.close()
 
@@ -1082,6 +1209,60 @@ class TestGUIBridge:
                         result = await session.handle({"command": "play_media", "device": gui_bridge.device_to_json(airplay), "path": str(media)})
             assert result["transport"] == "dlna-fallback"
             assert result["status"] == "playing"
+        finally:
+            session.close()
+
+    @pytest.mark.asyncio
+    async def test_bridge_play_media_with_position_prefers_dlna_on_dual_device(self, tmp_path):
+        from gui_bridge import BridgeSession
+        import gui_bridge
+        import airplay_controller
+        import dlna_controller
+
+        media = tmp_path / "video.mp4"
+        media.write_bytes(b"fake")
+        device = Device("TV", DeviceType.AIRPLAY, "1.1.1.1", 7000, services=["airplay", "dlna"])
+        dlna = Device("TV", DeviceType.DLNA, "1.1.1.1", 5000, control_url="/AVTransport/control")
+        session = BridgeSession()
+        try:
+            with patch.object(gui_bridge, "save_state"):
+                with patch.object(airplay_controller, "play", new_callable=AsyncMock) as airplay_mock:
+                    with patch.object(session, "_dlna_target", new_callable=AsyncMock, return_value=dlna):
+                        with patch.object(session, "_play_dlna_file", new_callable=AsyncMock, return_value={"status": "playing", "url": "http://local/video.mp4"}):
+                            with patch.object(dlna_controller, "seek", new_callable=AsyncMock) as seek_mock:
+                                result = await session.handle({
+                                    "command": "play_media",
+                                    "device": gui_bridge.device_to_json(device),
+                                    "path": str(media),
+                                    "position": "00:01:23",
+                                })
+            assert result["transport"] == "dlna"
+            airplay_mock.assert_not_awaited()
+            seek_mock.assert_awaited_once_with(dlna, "00:01:23")
+        finally:
+            session.close()
+
+    @pytest.mark.asyncio
+    async def test_bridge_play_media_zero_position_allows_airplay(self, tmp_path):
+        from gui_bridge import BridgeSession
+        import gui_bridge
+        import airplay_controller
+
+        media = tmp_path / "video.mp4"
+        media.write_bytes(b"fake")
+        device = Device("TV", DeviceType.AIRPLAY, "1.1.1.1", 7000)
+        session = BridgeSession()
+        try:
+            with patch.object(gui_bridge, "save_state"):
+                with patch.object(airplay_controller, "play", new_callable=AsyncMock) as airplay_mock:
+                    result = await session.handle({
+                        "command": "play_media",
+                        "device": gui_bridge.device_to_json(device),
+                        "path": str(media),
+                        "position": "00:00:00",
+                    })
+            assert result["transport"] == "airplay"
+            airplay_mock.assert_awaited_once()
         finally:
             session.close()
 
@@ -1163,6 +1344,32 @@ class TestGUIBridge:
             session.close()
 
     @pytest.mark.asyncio
+    async def test_bridge_play_media_retries_start_position_seek(self, tmp_path):
+        from gui_bridge import BridgeSession
+        import gui_bridge
+        import dlna_controller
+
+        media = tmp_path / "video.mp4"
+        media.write_bytes(b"fake")
+        dlna = Device("TV", DeviceType.DLNA, "1.1.1.1", 5000, control_url="/AVTransport/control")
+        session = BridgeSession()
+        try:
+            with patch.object(gui_bridge.MediaServer, "start_background", return_value=("127.0.0.1", 8080)):
+                with patch.object(gui_bridge.MediaServer, "get_url", return_value="http://127.0.0.1:8080/video.mp4"):
+                    with patch.object(dlna_controller, "play", new_callable=AsyncMock):
+                        with patch.object(dlna_controller, "seek", new_callable=AsyncMock, side_effect=[RuntimeError("not ready"), None]) as seek_mock:
+                            result = await session.handle({
+                                "command": "play_media",
+                                "device": gui_bridge.device_to_json(dlna),
+                                "path": str(media),
+                                "position": "00:02:03",
+                            })
+            assert result["position"] == "00:02:03"
+            assert seek_mock.await_count == 2
+        finally:
+            session.close()
+
+    @pytest.mark.asyncio
     async def test_bridge_play_media_cleans_server_on_dlna_failure(self, tmp_path):
         from gui_bridge import BridgeSession
         import gui_bridge
@@ -1220,5 +1427,27 @@ class TestGUIBridge:
                 result = await session.restart_stream({"video_bitrate": "4500k"})
             assert result["status"] == "playing"
             assert play_mock.await_args.args[0]["video_bitrate"] == "4500k"
+        finally:
+            session.close()
+
+    @pytest.mark.asyncio
+    async def test_bridge_restart_stream_capture_uses_updated_fps(self):
+        from gui_bridge import BridgeSession
+
+        session = BridgeSession()
+        session.current_session = {
+            "kind": "screen",
+            "device": {"name": "TV", "device_type": "dlna", "ip": "1.1.1.1", "port": 5000},
+            "source_id": 1,
+            "label": "screen",
+            "fps": 10,
+            "video_bitrate": "3500k",
+        }
+        try:
+            with patch.object(session, "cast_capture", new_callable=AsyncMock, return_value={"status": "casting"}) as cast_mock:
+                result = await session.restart_stream({"video_bitrate": "4500k", "fps": 25})
+            assert result["status"] == "casting"
+            assert cast_mock.await_args.args[0]["fps"] == 25
+            assert cast_mock.await_args.args[0]["video_bitrate"] == "4500k"
         finally:
             session.close()
